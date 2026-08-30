@@ -60,4 +60,14 @@
 #define BRIGHTNESS_STEPS   6
 #define BRIGHTNESS_MIN_PCT 15
 
+/* Firmware app state (see docs/design.md state machine) */
+enum AppState { APP_IDLE, APP_NAV, APP_ARRIVED, APP_LOST };
+
+/* Link timeout: >15 s without a valid NavData frame → LOST (protocol.md §2) */
+#define LINK_TIMEOUT_MS    15000
+/* ARRIVED: show "Arrived ✓" for 10 s, then → IDLE (protocol.md §2) */
+#define ARRIVED_TIMEOUT_MS 10000
+/* LOST: show "Link lost" for 5 s, then → IDLE (protocol.md §2) */
+#define LOST_TIMEOUT_MS      5000
+
 #endif

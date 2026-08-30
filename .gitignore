@@ -41,3 +41,7 @@ Testing/
 # Logs
 *.log
 serial_capture.log
+
+# Host unit-test binaries (built on the dev machine, not in the repo)
+firmware/test/test_nav_message
+firmware/test/test_*
