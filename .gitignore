@@ -1,0 +1,43 @@
+# Build
+build/
+*.elf
+*.bin
+*.hex
+*.map
+*.hex
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# PlatformIO
+.pio/
+
+# Arduino-IDE
+ArduinoSketch/
+*.ino.bak
+
+# Android
+phone/.gradle/
+phone/app/build/
+phone/build/
+phone/local.properties
+phone/.idea/
+
+# CMake/CTest
+CMakeCache.txt
+CTestTestfile.cmake
+Testing/
+
+# Secrets
+*.key
+*.pem
+.env
+.env.local
+
+# Logs
+*.log
+serial_capture.log
