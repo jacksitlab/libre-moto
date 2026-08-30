@@ -11,8 +11,8 @@ Sources: Elecrow product datasheet + official wiki + official ESPHome example (a
 | Display | 2.1" IPS 480×480, **ST7701S**, RGB parallel interface |
 | Touch | **CST816** (CST8x family), I2C, address **0x15** |
 | I/O expander | **PCF8574** @ I2C, address **0x21** |
-| Rotary | A/B encoder + press switch |
 | Power | 5 V / 1 A |
+| Knob/encoder | **not present** on this board revision — all UI input is touch |
 
 ## Arduino_GFX initialization (ST7701 + RGB)
 
@@ -50,10 +50,7 @@ Arduino_ST7701_RGBPanel *gfx = new Arduino_ST7701_RGBPanel(
 |---|---|---|
 | I2C SDA | **38** | PCF8574 + CST816 (+ optional SSD1306 OLED) |
 | I2C SCL | **39** | same bus |
-| Encoder A | **42** | `INPUT_PULLUP` (swap A/B if knob direction is inverted) |
-| Encoder B | **4**  | `INPUT_PULLUP`, interrupts (CHANGE) |
 | Backlight | **6** | LEDC PWM, ~20 kHz |
-| Reset (knob) | — | via PCF8574 (see below) |
 | BOOT | 0 | (board default) |
 
 ## PCF8574 expander (I2C 0x21)
@@ -64,7 +61,7 @@ Arduino_ST7701_RGBPanel *gfx = new Arduino_ST7701_RGBPanel(
 | **P2** | touch (CST816) IRQ | input (pull-up) |
 | **P3** | LCD power | output |
 | **P4** | LCD reset (ST7701) | output, **inverted** |
-| **P5** | encoder press (knob button) | input (pull-up) |
+| **P5** | (was encoder press on older boards) | **unused** |
 
 ### Boot sequence (official ESPHome example, ~800 ms)
 
@@ -85,14 +82,11 @@ P2 (TP IRQ)     → ON  (keep pull-up)
 - `Adafruit_CST8XX` (or `Adafruit_TouchScreen`): constructor with `irqPin = -1, resetPin = -1` → read proc by polling (20–25 ms) + IRQ via P2 as wake trigger.
 - Coordinates: 480×480, rotation 0, **round display** → clamp corners to a circle of radius 240 px.
 
-## Rotary encoder
+## Rotary encoder — not used
 
-- A=42, B=4, both `INPUT_PULLUP`, CHANGE interrupts.
-- Press: PCF8574 P5 (input, pull-up).
-- Resolution: 1 step = 1 click (4 edges).
-- Speed-dependent scaling (ESPHome example):
-  - <30 ms between steps → 10 units
-  - <60 ms → 5, <120 ms → 3, <200 ms → 2, else 1.
+Therotary knob has been removed. UI input is touch only:
+**tap** (screen cycle), **hold ≥ 500 ms** (back to home), **horiz. swipe** (brightness).
+Pins 42/4 (old encoder A/B) and PCF8574 P5 (old knob press) are not connected in software.
 
 ## Libraries (Arduino IDE / PlatformIO)
 

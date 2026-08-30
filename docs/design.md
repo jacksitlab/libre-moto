@@ -17,13 +17,12 @@ Display: 480×480 px, **round** → all layouts inside a circle of radius ~238 p
         │      ● BLE ✓        │   status dot (green/amber/red)
         │      Bat 87%        │   phone battery (last known)
         │                     │
-        │   [  Show map  ]    │   touch button (or knob long-press)
+        │   [  Show map  ]    │   touch button (or tap = cycle screens)
         │                     │
         │  ▭ 350m  ⛽ 50      │   last nav instruction (small, gray)
         └─────────────────────┘
 ```
-- Lower area (three soft-touch zones on the lower arc of the circle) or knob press = "map on/off" for the next nav phase.
-- Knob turn = brightness (label shown for 100 ms).
+- All input is **touch** (no rotary knob on this board revision): tap = next screen, hold ≥ 500 ms = back to home, horizontal swipe on home = brightness ±10 % (toast feedback).
 
 ### S3 — Nav instruction (STATE_NAV, map_on=false)
 ```
@@ -56,7 +55,7 @@ Display: 480×480 px, **round** → all layouts inside a circle of radius ~238 p
 - Map content from C4 MapFrames: route, 2–4 adjacent roads, destination circle.
 - Vehicle arrow always dead center, rotates with `heading` (map fixed, only arrow turns) — OR map rotates (flags bit0) + arrow points up. **Default: map rotates, arrow points up** (like Beeline/Android Auto).
 - Header overlays (not a separate screen).
-- Knob press → S3 (nav instruction), knob long-press → S2 (home).
+- Screen switching: tap (map ↔ nav instruction), hold (map → home).
 - Refresh: 1–2 Hz per `MapData`.
 
 ### S5 — Status/Connection (stateless overlay)
@@ -88,17 +87,14 @@ State details:
 - **ARRIVED**: overlay for 10 s, then IDLE.
 - **LOST**: "Link lost" overlay for 5 s, then IDLE (advertising continues).
 
-## Navigation elements (knob + touch)
+## Interaction (touch only — no knob/encoder on this board)
 
 | Action | Result |
 |---|---|
-| Knob turn (IDLE) | brightness 0.15–1.0 (persisted in Preferences) |
-| Knob turn (NAV) | map zoom ± (scale 2–8 px/m, phone-side) — v0.1: brightness; zoom arrives in v0.2 |
-| Knob press (NAV, map) | → S3 (nav instruction) |
-| Knob press (NAV, instruction) | → S4 (map) |
-| Knob press (IDLE) | → S4 (map, if recently capable), else nothing |
-| Double-tap (anywhere) | → IDLE (back) |
-| Tap header (NAV) | toggle header items (limit/battery show/hide) |
+| Tap (any screen) | cycle: home → nav instruction → map → home |
+| Hold ≥ 500 ms (any screen) | → S2 (home), toast "Home" |
+| Horizontal swipe on home (≥ 40 px) | brightness ∓ 10 %, persisted, toast "Brightness NN %" |
+| Tap header (NAV, v0.2) | toggle header items (limit/battery show/hide) |
 
 ## Colors (v0.1, dark theme)
 
