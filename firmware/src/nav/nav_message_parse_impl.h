@@ -323,4 +323,66 @@ extern "C" bool parse_nav_message(const char *json, size_t len, struct NavState 
   return navmsg::validate(json, len, out);
 }
 
+/* ---- Control (protocol.md §5) ---------------------------------- */
+namespace navmsg {
+inline bool parse_ctrl_object(Cursor &c, struct CtrlState *out) {
+  if (!skip_ws(c) || *c.p != '{') return false;
+  ++c.p;
+  if (!skip_ws(c)) return false;
+  if (*c.p == '}') { c.p++; return false; } /* {} → nothing to do */
+
+  bool any = false;
+  for (;;) {
+    if (!skip_ws(c)) return false;
+    if (*c.p != '"') return false;
+    char key[48];
+    if (!parse_string(c, key, sizeof key)) return false;
+    if (!skip_ws(c) || c.p >= c.end || *c.p != ':') return false;
+    c.p++;
+    if (!skip_ws(c)) return false;
+
+    if (strcmp(key, "brightness_pct") == 0) {
+      double v; if (!parse_number(c, v)) return false;
+      if (v < 0 || v > 100) return false;
+      out->brightness_pct = (int)v;
+      out->brightness_set = true;
+      any = true;
+    } else if (strcmp(key, "state") == 0) {
+      char v[16]; if (!parse_string(c, v, sizeof v)) return false;
+      any = true; /* recognized key with valid value → something to do */
+      if (strcmp(v, "idle") == 0) out->force_idle = true;
+      /* other state keywords: accepted & no-op (forward compat) */
+    } else if (strcmp(key, "reset_map") == 0) {
+      bool v; if (!parse_bool(c, v)) return false;
+      any = true;
+      if (v) out->reset_map = true;   /* false → no-op */
+    } else if (strcmp(key, "v") == 0) {
+      double v; if (!parse_number(c, v)) return false;
+      (void)v; /* version accepted, not enforced for Control */
+    } else {
+      if (!skip_value(c)) return false;
+    }
+
+    if (!skip_ws(c)) return false;
+    if (*c.p == '}') { c.p++; break; }
+    if (*c.p != ',') return false;
+    c.p++;
+    if (!skip_ws(c)) return false;
+    if (*c.p == '}') { c.p++; break; }
+  }
+  return any;
+}
+} /* namespace navmsg */
+
+extern "C" bool parse_ctrl_message(const char *json, size_t len, struct CtrlState *out) {
+  if (!json || !out) return false;
+  memset(out, 0, sizeof *out);
+  if (len == 0) len = strlen(json);
+  if (len == 0) return false;
+  navmsg::Cursor c{json, json + len};
+  if (!navmsg::parse_ctrl_object(c, out)) return false;
+  while (c.p < c.end && (c.p[0]==' '||c.p[0]=='\t'||c.p[0]=='\r'||c.p[0]=='\n')) ++c.p;
+  return c.p == c.end; /* trailing junk → invalid */
+}
+
 #endif /* LIBREMOTO_NAV_MESSAGE_PARSE_IMPL_H */

@@ -5,7 +5,8 @@
 #include <PCF8574.h>
 #include <Preferences.h>
 #include "config.h"
-#include "../nav/nav_message.h"   /* NavData protocol v1 parser (protocol.md §2) */
+#include "../nav/nav_message.h" /* NavData + Control protocol v1 (protocol.md §2, §5) */
+#include "../ble/ble_link.h"   /* GATT server: NavData/Status/MapData/Control         */
 
 /*---------------------------------------------------------------
  * Hardware (CrowPanel 2.1" — see docs/hardware.md)
@@ -58,6 +59,12 @@ static uint32_t    rx_count = 0;     /* received frames (BLE-ready count)  */
 static uint32_t    rx_ok_count = 0;   /* ... of which parsed OK             */
 static unsigned long last_data_ms = 0;/* millis() of last valid frame       */
 static AppState    app = APP_IDLE;
+
+/* ---- MapFrame statistics (protocol.md §3/§4; render = C.1) ---- */
+static uint8_t  map_seq_last = 0;     /* last OK frame seq     */
+static uint32_t map_drop_count = 0;   /* dropped/stale/incomplete frames */
+static bool     map_seq_seen = false; /* any OK frame yet?     */
+static bool     ble_ready = false;    /* BLE link module up    */
 static unsigned long state_until_ms = 0;
 
 /* colors (dark theme, see docs/design.md) */
@@ -341,6 +348,7 @@ static void create_info_screen(void) {
 /* forward decls (defined later in the file) */
 static void goto_screen(lv_obj_t *scr, const char *name);
 static void toast(const char *text, lv_color_t color);
+static void toast_debug(const char *text, lv_color_t color, uint32_t ms);
 
 /* Render the current NavState on the nav screen (arrow + distance + road). */
 static void render_nav_from_state(void) {
@@ -390,7 +398,9 @@ static void on_nav_state(const NavState &st) {
 
   switch (st.msg_type) {
     case NAV_MSG_BEEP:
-      /* heartbeat: keeps the link alive; does not change state (protocol.md) */
+      /* heartbeat: keeps the link alive; does not change state (protocol.md).
+       * Toast doubles as the on-board BLE test aid (no state to change). */
+      toast("Heartbeat ✓", C_ACCENT);
       break;
 
     case NAV_MSG_NAV: {
@@ -457,28 +467,185 @@ static void handle_state_timeouts(void) {
 }
 
 /*---------------------------------------------------------------
- * BLE status dot: color follows the connection/app state
- *   IDLE   → amber, 500 ms blink ("standby")
- *   NAV    → green, steady
- *   LOST   → red, steady          (*dot not visible on those screens,
- *   ARRIVED→ green, steady          but the timer keeps the right state)
+ * Status payload (protocol.md §3) — device → phone JSON.
+ * Rebuilt in place; sent via ble_link_update_status().
+ *--------------------------------------------------------------*/
+static const char *app_state_name(AppState s) {
+  switch (s) {
+    case APP_NAV:     return "nav";
+    case APP_IDLE:    return "idle";
+    case APP_ARRIVED: return "arrived";
+    case APP_LOST:    return "nav"; /* protocol §3: state ∈ boot|idle|nav|arrived */
+    default:          return "idle";
+  }
+}
+
+static void publish_status(void) {
+  static char payload[180];
+  snprintf(payload, sizeof payload,
+           "{\"v\":1,\"state\":\"%s\",\"ble_rx_count\":%u,"
+           "\"brightness_pct\":%d,\"uptime_s\":%lu,"
+           "\"seq_last\":%u,\"map_drop_count\":%u}",
+           app_state_name(app),
+           (unsigned)rx_count,
+           brightness_pct,
+           (unsigned long)(millis() / 1000),
+           (unsigned)map_seq_last,
+           (unsigned)map_drop_count);
+  if (ble_link_connected()) {
+    ble_link_update_status(payload);
+  }
+}
+
+/*---------------------------------------------------------------
+ * BLE → app callbacks (run on the ARDUINO core via ble_link_poll).
+ *--------------------------------------------------------------*/
+
+/* NavData JSON (protocol.md §2) — same path as the serial mock. */
+static void on_ble_nav(const void *data, size_t len) {
+  char buf[NAV_MAX_LEN + 1];
+  if (len >= sizeof(buf)) len = sizeof(buf) - 1;
+  memcpy(buf, data, len);
+  buf[len] = 0;
+
+  rx_count++;
+  NavState st;
+  if (parse_nav_message(buf, len, &st)) {
+    Serial.printf("[RX] BLE frame #%u OK  t=%d %u B\n",
+                  (unsigned)rx_count, (unsigned)st.msg_type, (unsigned)len);
+    on_nav_state(st);
+    publish_status();
+  } else {
+    /* spec §6: parse error → frame ignored, rx_count still incremented.
+     * On-board: show length + hex dump so we can read it without a wire. */
+    Serial.printf("[RX] BLE frame #%u PARSE ERROR (%u B)\n",
+                  (unsigned)rx_count, (unsigned)len);
+    char dbg[96];
+    const uint8_t *b = (const uint8_t *)buf;
+    int n = len < 28 ? (int)len : 28;
+    int p = 0;
+    for (int i = 0; i < n && p < 80; i++)
+      p += snprintf(dbg + p, sizeof(dbg) - p, "%02X ", b[i]);
+    toast_debug(dbg, C_BAD, 4000);
+    publish_status();
+  }
+}
+
+/* MapData binary frame (protocol.md §4/§6) — validation + stats.
+ * Rendering happens in milestone C.1 (map renderer). */
+#define MAP_MAGIC  ((uint16_t)0x4D4C)
+static void on_ble_map_frame(const void *data, size_t len) {
+  const uint8_t *f = (const uint8_t *)data;
+
+  if (len < 11) {
+    map_drop_count++;
+    Serial.printf("[MAP] drop: %u B (header needs 11)\n", (unsigned)len);
+    publish_status();
+    return;
+  }
+
+  uint16_t magic = (uint16_t)(f[0] | (f[1] << 8));
+  uint8_t  ver   = f[2];
+  uint8_t  seq   = f[3];
+  if (magic != MAP_MAGIC) {
+    map_drop_count++;
+    Serial.printf("[MAP] drop: magic 0x%04X != 0x%04X\n", magic, MAP_MAGIC);
+    publish_status();
+    return;
+  }
+  if (ver != 1) {
+    map_drop_count++;
+    Serial.printf("[MAP] drop: ver %u (want 1)\n", ver);
+    publish_status();
+    return;
+  }
+  if (len > MAP_FRAME_MAX) {
+    map_drop_count++;
+    Serial.println("[MAP] drop: > 4 KB");
+    publish_status();
+    return;
+  }
+
+  /* seq handling (spec §6): duplicate ignored, >64 older = stale */
+  if (map_seq_seen) {
+    int8_t d = (int8_t)(seq - map_seq_last);
+    if (d == 0) return;              /* duplicate — no log, no counter */
+    if (d < -64) {
+      map_drop_count++;
+      Serial.printf("[MAP] drop: seq %u stale (last %u)\n", seq, map_seq_last);
+      publish_status();
+      return;
+    }
+  }
+  /* forward or new frame: accept */
+  map_seq_last = seq;
+  map_seq_seen = true;
+  Serial.printf("[MAP] frame seq=%u accepted (%u B)\n", seq, (unsigned)len);
+  publish_status();
+}
+
+/* Control JSON (protocol.md §5) */
+static void on_ble_ctrl(const void *data, size_t len) {
+  char buf[CTRL_MAX_LEN + 1];
+  if (len >= sizeof(buf)) len = sizeof(buf) - 1;
+  memcpy(buf, data, len);
+  buf[len] = 0;
+
+  CtrlState cs;
+  if (!parse_ctrl_message(buf, len, &cs)) {
+    Serial.printf("[CTL] PARSE ERROR (%u B): %.60s\n", (unsigned)len, buf);
+    publish_status();
+    return;
+  }
+  if (cs.brightness_set) {
+    apply_brightness(cs.brightness_pct);   /* also persisted (spec §5) */
+    Serial.printf("[CTL] brightness %d%%\n", cs.brightness_pct);
+  }
+  if (cs.force_idle) {
+    app = APP_IDLE;
+    state_until_ms = 0;
+    goto_screen(home_screen, "home (ctrl)");
+    Serial.println("[CTL] state → idle");
+  }
+  if (cs.reset_map) {
+    map_seq_last = 0;
+    map_seq_seen = false;
+    map_drop_count = 0;
+    Serial.println("[CTL] map buffer reset (seq → 0)");
+  }
+  publish_status();
+}
+
+/*---------------------------------------------------------------
+ * BLE status dot: reflects the radio link AND the app state.
+ *   Not connected   → grey,  steady ("BLE: offline")
+ *   Connected + IDLE→ amber, 500 ms blink ("BLE: standby")
+ *   Connected + NAV → green,  steady   ("BLE: connected ✓")
+ *   Connected + LOST→ red,    steady   (link alive, nav route lost)
+ * Dot lives on the home + nav screens; the 500 ms timer keeps the
+ * colour right on whichever screen is active.
  *--------------------------------------------------------------*/
 
 static void ble_blink_cb(lv_timer_t *t) {
   (void)t;
   static bool on = true;
+
+  if (!ble_link_connected()) {
+    if (ble_dot)   lv_obj_set_style_bg_color(ble_dot, lv_color_hex(0x3B4148), 0);
+    if (ble_label) lv_label_set_text(ble_label, "BLE: offline");
+    return;
+  }
+
   if (app == APP_IDLE) {
     on = !on;
-    if (ble_dot) lv_obj_set_style_bg_color(ble_dot, on ? C_WARN : lv_color_hex(0x3B4148), 0);
+    if (ble_dot)   lv_obj_set_style_bg_color(ble_dot, on ? C_WARN : lv_color_hex(0x3B4148), 0);
     if (ble_label) lv_label_set_text(ble_label, "BLE: standby");
   } else {
-    static const lv_color_t c[4] = { C_WARN, C_ACCENT, C_ACCENT, C_BAD };
-    (void)c;
-    if (ble_dot) lv_obj_set_style_bg_color(ble_dot, (app == APP_LOST) ? C_BAD : C_ACCENT, 0);
+    if (ble_dot)   lv_obj_set_style_bg_color(ble_dot, (app == APP_LOST) ? C_BAD : C_ACCENT, 0);
     if (ble_label) {
-      if (app == APP_LOST)       lv_label_set_text(ble_label, "BLE: link lost");
+      if (app == APP_LOST)         lv_label_set_text(ble_label, "BLE: link lost");
       else if (app == APP_ARRIVED) lv_label_set_text(ble_label, "BLE: connected \u2713");
-      else                        lv_label_set_text(ble_label, "BLE: connected \u2713");
+      else                         lv_label_set_text(ble_label, "BLE: connected \u2713");
     }
   }
 }
@@ -511,6 +678,27 @@ static void toast(const char *text, lv_color_t color) {
   lv_obj_center(toast_label);
   if (toast_timer) lv_timer_del(toast_timer);
   toast_timer = lv_timer_create(toast_hide_cb, 800, NULL);
+}
+
+/* Same, but small font + long lifetime — for hex dumps / diagnostics. */
+static void toast_debug(const char *text, lv_color_t color, uint32_t ms) {
+  if (toast_label) lv_obj_del(toast_label);
+  toast_label = NULL;
+  toast_label = lv_label_create(lv_screen_active());
+  lv_obj_add_flag(toast_label, LV_OBJ_FLAG_FLOATING);
+  lv_obj_set_style_bg_color(toast_label, lv_color_hex(0x161B22), 0);
+  lv_obj_set_style_bg_opa(toast_label, LV_OPA_90, 0);
+  lv_obj_set_style_pad_hor(toast_label, 12, 0);
+  lv_obj_set_style_pad_ver(toast_label, 8, 0);
+  lv_obj_set_style_radius(toast_label, 10, 0);
+  lv_obj_set_style_text_font(toast_label, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_color(toast_label, color, 0);
+  lv_obj_set_width(toast_label, 440);
+  lv_obj_set_style_text_align(toast_label, LV_TEXT_ALIGN_LEFT, 0);
+  lv_label_set_text(toast_label, text);
+  lv_obj_align(toast_label, LV_ALIGN_CENTER, 0, 0);
+  if (toast_timer) lv_timer_del(toast_timer);
+  toast_timer = lv_timer_create(toast_hide_cb, ms, NULL);
 }
 
 /*---------------------------------------------------------------
@@ -738,6 +926,21 @@ void setup() {
   create_map_screen();
   create_info_screen();
 
+  /* ---- BLE GATT server (protocol.md §1) ----
+   * Server runs in its own FreeRTOS task; callbacks only push into
+   * mutex-protected queues that ble_link_poll() drains on the app core. */
+  {
+    ble_link_cb ble_cb;
+    memset(&ble_cb, 0, sizeof ble_cb);
+    ble_cb.on_nav      = on_ble_nav;
+    ble_cb.on_map_frame = on_ble_map_frame;
+    ble_cb.on_ctrl     = on_ble_ctrl;
+    ble_link_init(&ble_cb);
+    ble_ready = true;
+    Serial.println("[BLE] GATT server up: NavData/Status/MapData/Control");
+    Serial.printf("[BLE] adv=%s name=%s\n", "on", BLE_NAME);
+  }
+
   ble_timer = lv_timer_create(ble_blink_cb, 500, NULL);
 
   goto_screen(home_screen, "home");
@@ -747,6 +950,7 @@ void setup() {
 
 void loop() {
   handle_serial();
+  ble_link_poll();          /* drain NavData/Control/MapData queues, adv state */
   handle_gesture_state();
   handle_state_timeouts();
   lv_timer_handler();

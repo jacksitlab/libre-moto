@@ -56,9 +56,22 @@ struct NavState {
   bool     has_data;    /* true if this state came from a valid parse */
 };
 
+/* Parsed Control message (protocol.md §5). All setters are optional —
+ * a field is "not provided" when its *_set flag is false. */
+struct CtrlState {
+  int  brightness_pct;   /* 0..100 */
+  bool brightness_set;
+  bool force_idle;       /* {"state":"idle"} */
+  bool reset_map;        /* {"reset_map":true} */
+};
+
 /* Parsed message → `out`. Returns true on success.
  * On failure `out` is left untouched. */
 bool parse_nav_message(const char *json, size_t len, struct NavState *out);
+
+/* Parsed Control message → `out`. Returns true on success (at least one
+ * known field must be present), false on parse error / empty object. */
+bool parse_ctrl_message(const char *json, size_t len, struct CtrlState *out);
 
 /* C-only convenience (same as parse_nav_message, no name mangling risk). */
 #define nav_message_parse parse_nav_message
