@@ -4,9 +4,11 @@
 #include <Adafruit_CST8XX.h>
 #include <PCF8574.h>
 #include <Preferences.h>
+#include <math.h>
 #include "config.h"
 #include "../nav/nav_message.h" /* NavData + Control protocol v1 (protocol.md §2, §5) */
 #include "../ble/ble_link.h"   /* GATT server: NavData/Status/MapData/Control         */
+#include "../map/map_frame.h"  /* MapData binary frames (protocol.md §4)              */
 
 /*---------------------------------------------------------------
  * Hardware (CrowPanel 2.1" — see docs/hardware.md)
@@ -42,11 +44,13 @@ static lv_obj_t *nav_text = NULL;    // road name
 static lv_obj_t *nav_status = NULL;  // "Link lost" / "Arrived" / ""
 
 static lv_obj_t *map_screen = NULL;
-static lv_obj_t *map_route = NULL;
-static lv_obj_t *map_road1 = NULL;
-static lv_obj_t *map_road2 = NULL;
-static lv_obj_t *map_vehicle = NULL;
-static lv_obj_t *map_label = NULL;
+/* segment pool: up to MAP_MAX_SEGS lines, created once, refilled per frame */
+#define MAP_POOL      30
+static lv_obj_t *map_lines[MAP_POOL];
+static lv_obj_t *map_vehicle = NULL;   /* triangle: heading arrow (fixed) or marker (rotating) */
+static lv_obj_t *map_marker = NULL;    /* destination marker (rotating frame) */
+static lv_obj_t *map_scale = NULL;     /* scale bar line */
+static lv_obj_t *map_label = NULL;     /* heading / scale label */
 
 static lv_obj_t *active_screen = NULL;
 static lv_timer_t *ble_timer = NULL;
@@ -274,52 +278,74 @@ static void create_nav_screen(void) {
 static void create_map_screen(void) {
   map_screen = new_screen();
 
-  /* placeholder roads (demo geometry \u2014 replaced by MapFrame renderer next task) */
-  map_road1 = lv_line_create(map_screen);
-  lv_point_precise_t r1[2] = {{60, 340}, {440, 280}};
-  lv_line_set_points(map_road1, r1, 2);
-  lv_obj_set_size(map_road1, 380, 120);
-  lv_obj_align(map_road1, LV_ALIGN_CENTER, 10, 130);
-  lv_obj_set_style_line_width(map_road1, 4, 0);
-  lv_obj_set_style_line_color(map_road1, lv_color_hex(0x5C6773), 0);
-  lv_obj_remove_flag(map_road1, LV_OBJ_FLAG_CLICKABLE);
+  /* ---- segment pool: MAP_POOL lines, created once ------------------
+   * Per frame we only refill points[0..2] + size + visibility — no
+   * object churn at 2 Hz. Points live in a static buffer per line. */
+  /* shared static placeholder: the pool starts hidden, and every visible
+     line gets its own valid map_pts[] pointer on the first frame.
+     (A local array here would dangle once this function returns.) */
+  static lv_point_precise_t map_pts_placeholder[1];
+  map_pts_placeholder[0].x = 0;
+  map_pts_placeholder[0].y = 0;
+  for (int i = 0; i < MAP_POOL; i++) {
+    map_lines[i] = lv_line_create(map_screen);
+    lv_line_set_points(map_lines[i], map_pts_placeholder, 1);
+    lv_obj_remove_flag(map_lines[i], (lv_obj_flag_t)((lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN)));
+    lv_obj_add_flag(map_lines[i], LV_OBJ_FLAG_HIDDEN);
+    /* Z-order = creation order (LVGL 9): roads first, then the vehicle
+       + marker created after the pool are drawn on top. */
+  }
 
-  map_road2 = lv_line_create(map_screen);
-  lv_point_precise_t r2[2] = {{320, 60}, {330, 420}};
-  lv_line_set_points(map_road2, r2, 2);
-  lv_obj_set_size(map_road2, 60, 360);
-  lv_obj_align(map_road2, LV_ALIGN_CENTER, 10, 0);
-  lv_obj_set_style_line_width(map_road2, 4, 0);
-  lv_obj_set_style_line_color(map_road2, lv_color_hex(0x5C6773), 0);
-  lv_obj_remove_flag(map_road2, LV_OBJ_FLAG_CLICKABLE);
-
-  map_route = lv_line_create(map_screen);
-  lv_point_precise_t rt[5] = {{80, 380}, {200, 300}, {280, 200}, {330, 120}, {345, 70}};
-  lv_line_set_points(map_route, rt, 5);
-  lv_obj_set_size(map_route, 290, 340);
-  lv_obj_align(map_route, LV_ALIGN_CENTER, 0, 10);
-  lv_obj_set_style_line_width(map_route, 7, 0);
-  lv_obj_set_style_line_color(map_route, C_TEXT, 0);
-  lv_obj_remove_flag(map_route, LV_OBJ_FLAG_CLICKABLE);
-
-  /* vehicle: small triangle at center, pointing up (closed by repeating first point) */
+  /* ---- vehicle marker: white arrowhead "^" (chevron), tip pointing up ---- */
   map_vehicle = lv_line_create(map_screen);
-  lv_point_precise_t v[4] = {{240, 205}, {222, 250}, {258, 250}, {240, 205}};
-  lv_line_set_points(map_vehicle, v, 4);
-  lv_obj_set_size(map_vehicle, 50, 60);
-  lv_obj_align(map_vehicle, LV_ALIGN_CENTER, 0, 0);
-  lv_obj_set_style_line_width(map_vehicle, 5, 0);
-  lv_obj_set_style_line_color(map_vehicle, C_ACCENT, 0);
-  lv_obj_set_style_bg_color(map_vehicle, C_ACCENT, 0);
-  lv_obj_set_style_bg_opa(map_vehicle, LV_OPA_COVER, 0);
-  lv_obj_remove_flag(map_vehicle, LV_OBJ_FLAG_CLICKABLE);
+  /* tip (240,212), wings (220,246) (260,246) — a bold "^" chevron.
+     Points MUST live in a static buffer: lv_line keeps only the pointer
+     and the array must outlive this function (stack would dangle). */
+  static lv_point_precise_t vehicle_pts[3];
+  vehicle_pts[0].x = 220; vehicle_pts[0].y = 246;
+  vehicle_pts[1].x = 240; vehicle_pts[1].y = 212;
+  vehicle_pts[2].x = 260; vehicle_pts[2].y = 246;
+  lv_line_set_points(map_vehicle, vehicle_pts, 3);
+  lv_obj_set_size(map_vehicle, 480, 480);   /* screen-absolute points */
+  lv_obj_align(map_vehicle, LV_ALIGN_TOP_LEFT, 0, 0);
+  lv_obj_set_style_line_width(map_vehicle, 10, 0);
+  lv_obj_set_style_line_color(map_vehicle, C_TEXT, 0);  /* white */
+  lv_obj_set_style_line_rounded(map_vehicle, true, 0);
+  lv_obj_remove_flag(map_vehicle, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
+  lv_obj_remove_flag(map_vehicle, LV_OBJ_FLAG_HIDDEN);
 
+  /* ---- destination dot marker (rotating frame only) ----------------- */
+  map_marker = lv_obj_create(map_screen);
+  lv_obj_remove_style_all(map_marker);
+  lv_obj_set_size(map_marker, 24, 24);
+  lv_obj_set_style_radius(map_marker, 12, 0);
+  lv_obj_set_style_bg_color(map_marker, C_ACCENT, 0);
+  lv_obj_set_style_bg_opa(map_marker, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(map_marker, 3, 0);
+  lv_obj_set_style_border_color(map_marker, C_TEXT, 0);
+  lv_obj_remove_flag(map_marker, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
+  lv_obj_add_flag(map_marker, LV_OBJ_FLAG_HIDDEN);   /* visible in rotating frames */
+
+  /* ---- scale bar (bottom left; shown when MAP_FLAG_SCALE_BAR) ------- */
+  map_scale = lv_line_create(map_screen);
+  static lv_point_precise_t scale_pts[2];   /* static: lv_line keeps the pointer */
+  scale_pts[0].x = 0;   scale_pts[0].y = 0;
+  scale_pts[1].x = 100; scale_pts[1].y = 0;
+  lv_line_set_points(map_scale, scale_pts, 2);
+  lv_obj_set_size(map_scale, 100, 1);
+  lv_obj_align(map_scale, LV_ALIGN_BOTTOM_LEFT, 24, -16);
+  lv_obj_set_style_line_width(map_scale, 3, 0);
+  lv_obj_set_style_line_color(map_scale, C_TEXT, 0);
+  lv_obj_remove_flag(map_scale, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
+  lv_obj_add_flag(map_scale, LV_OBJ_FLAG_HIDDEN);
+
+  /* ---- caption: heading + scale text ------------------------------- */
   map_label = lv_label_create(map_screen);
-  lv_label_set_text(map_label, "map (demo geometry)");
+  lv_label_set_text(map_label, "Warte auf Karten-Daten…");
   lv_obj_set_style_text_font(map_label, &lv_font_montserrat_14, 0);
   lv_obj_set_style_text_color(map_label, C_TEXT2, 0);
-  lv_obj_align(map_label, LV_ALIGN_CENTER, 0, -210);
-  lv_obj_remove_flag(map_label, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_align(map_label, LV_ALIGN_CENTER, 0, -215);
+  lv_obj_remove_flag(map_label, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
 }
 
 /*---------------------------------------------------------------
@@ -531,34 +557,198 @@ static void on_ble_nav(const void *data, size_t len) {
   }
 }
 
-/* MapData binary frame (protocol.md §4/§6) — validation + stats.
- * Rendering happens in milestone C.1 (map renderer). */
-#define MAP_MAGIC  ((uint16_t)0x4D4C)
+/* MapData binary frame (protocol.md §4/§6) — decode + render.
+ * Runs on the app core (ble_link_poll drains the queue). */
+
+/* per-line point buffers: mutable so lv_line keeps our pointer (no malloc at 2 Hz) */
+static lv_point_precise_t map_pts[MAP_POOL][MAP_MAX_PTS];
+
+static void render_map_frame(const MapFrame *fr) {
+  /* Rotate the world so that the vehicle heading points "up" (screen -y).
+     heading unit = degrees × 10, 0° = north.  Screen: +x right, +y down. */
+  double theta = fr->heading * 0.1 * (3.14159265358979323846 / 180.0);
+  double ct = cos(theta), st = sin(theta);
+
+  bool show_vehicle = (fr->flags & MAP_FLAG_VEHICLE) != 0;
+
+  int used = 0;
+
+  /* Z-order = creation order (LVGL 9): roads FIRST, route LAST (top).
+     Roads/branches: two thin (2 px) bright edge lines offset ±width/2
+     perpendicular to the center line (frame width = total road width).
+     Route: single fat white line with rounded joins ("filled" look).  */
+
+  /* pool budget: 1 slot per route/destination, 2 per road/branch */
+  int n_route = 0;
+  for (int si = 0; si < fr->seg_count; si++)
+    if (fr->segs[si].type == MAP_SEG_ROUTE) n_route++;
+  int route_room = n_route + 2;                 /* +2: destination + margin */
+  if (route_room > MAP_POOL) route_room = MAP_POOL;
+  int road_room = (MAP_POOL - route_room) / 2;
+  if (road_room < 0) road_room = 0;
+
+  static double base[2][MAP_MAX_PTS * 2]; /* base[0] center pts, base[1] edge pts */
+  int road_i = 0;
+
+  /* ---- pass 1a: roads / branches → 2 edge lines each ---------------- */
+  for (int si = 0; si < fr->seg_count; si++) {
+    const MapSeg *sg = &fr->segs[si];
+    if (sg->type != MAP_SEG_ROAD && sg->type != MAP_SEG_BRANCH) continue;
+    if (road_i >= road_room) continue;         /* pool exhausted — skip */
+    road_i++;
+
+    int n = sg->npts;
+    for (int i = 0; i < n; i++) {
+      double x = sg->points[i * 2 + 0];
+      double y = sg->points[i * 2 + 1];
+      base[0][i * 2 + 0] =  x * ct + y * st + 240.0;
+      base[0][i * 2 + 1] = -x * st + y * ct + 240.0;
+    }
+
+    double half = sg->width * 0.5;
+    if (half < 1.5) half = 1.5;
+
+    for (int e = 0; e < 2 && used < MAP_POOL - 2 - n_route; e++) {
+      double sign = (e == 0) ? 1.0 : -1.0;
+      /* per-vertex offset along the average of neighboring normals so
+         corners don't spike */
+      for (int i = 0; i < n; i++) {
+        double x = base[0][i * 2], y = base[0][i * 2 + 1];
+        double nx = 0, ny = 0;
+        if (n > 1) {
+          if (i < n - 1) {
+            double dx = base[0][(i + 1) * 2] - x, dy = base[0][(i + 1) * 2 + 1] - y;
+            double L = sqrt(dx * dx + dy * dy);
+            if (L > 0.0001) { nx += -dy / L; ny += dx / L; }
+          }
+          if (i > 0) {
+            double dx = x - base[0][(i - 1) * 2], dy = y - base[0][(i - 1) * 2 + 1];
+            double L = sqrt(dx * dx + dy * dy);
+            if (L > 0.0001) { nx += -dy / L; ny += dx / L; }
+          }
+        }
+        double L = sqrt(nx * nx + ny * ny);
+        if (L < 0.0001) { nx = 0; ny = 1; } else { nx /= L; ny /= L; }
+        double off = half * sign;
+        base[1][i * 2 + 0] = x + nx * off;
+        base[1][i * 2 + 1] = y + ny * off;
+      }
+      lv_obj_t *line = map_lines[used];
+      for (int i = 0; i < n; i++) {
+        map_pts[used][i].x = (lv_value_precise_t)lrint(base[1][i * 2 + 0]);
+        map_pts[used][i].y = (lv_value_precise_t)lrint(base[1][i * 2 + 1]);
+      }
+      lv_line_set_points(line, map_pts[used], n);
+      lv_obj_set_size(line, 480, 480);   /* points line-local → anchor at (0,0) */
+      lv_obj_align(line, LV_ALIGN_TOP_LEFT, 0, 0);
+      lv_obj_set_style_line_width(line, 2, 0);          /* thin edge */
+      lv_obj_set_style_line_color(line, C_TEXT, 0);     /* bright white */
+      lv_obj_set_style_line_rounded(line, true, 0);
+      lv_obj_remove_flag(line, LV_OBJ_FLAG_HIDDEN);
+      used++;
+    }
+  }
+
+  /* ---- pass 1b: destination (accent, single line) ------------------- */
+  for (int si = 0; si < fr->seg_count && used < MAP_POOL - n_route; si++) {
+    const MapSeg *sg = &fr->segs[si];
+    if (sg->type != MAP_SEG_DESTINATION) continue;
+    lv_obj_t *line = map_lines[used];
+    for (int i = 0; i < sg->npts; i++) {
+      double x = sg->points[i * 2 + 0];
+      double y = sg->points[i * 2 + 1];
+      map_pts[used][i].x = (lv_value_precise_t)lrint( x * ct + y * st + 240.0);
+      map_pts[used][i].y = (lv_value_precise_t)lrint(-x * st + y * ct + 240.0);
+    }
+    lv_line_set_points(line, map_pts[used], sg->npts);
+    lv_obj_set_size(line, 480, 480);
+    lv_obj_align(line, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_style_line_width(line, 4, 0);
+    lv_obj_set_style_line_color(line, C_ACCENT, 0);
+    lv_obj_set_style_line_rounded(line, true, 0);
+    lv_obj_remove_flag(line, LV_OBJ_FLAG_HIDDEN);
+    used++;
+  }
+
+  /* ---- pass 2: route (topmost, fat white, rounded) ------------------ */
+  for (int si = 0; si < fr->seg_count && used < MAP_POOL; si++) {
+    const MapSeg *sg = &fr->segs[si];
+    if (sg->type != MAP_SEG_ROUTE) continue;
+    lv_obj_t *line = map_lines[used];
+    for (int i = 0; i < sg->npts; i++) {
+      double x = sg->points[i * 2 + 0];
+      double y = sg->points[i * 2 + 1];
+      map_pts[used][i].x = (lv_value_precise_t)lrint( x * ct + y * st + 240.0);
+      map_pts[used][i].y = (lv_value_precise_t)lrint(-x * st + y * ct + 240.0);
+    }
+    lv_line_set_points(line, map_pts[used], sg->npts);
+    lv_obj_set_size(line, 480, 480);
+    lv_obj_align(line, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_style_line_width(line, sg->width, 0);   /* fat filled look */
+    lv_obj_set_style_line_color(line, C_TEXT, 0);      /* white          */
+    lv_obj_set_style_line_rounded(line, true, 0);
+    lv_obj_remove_flag(line, LV_OBJ_FLAG_HIDDEN);
+    used++;
+  }
+  for (int i = used; i < MAP_POOL; i++)
+    lv_obj_add_flag(map_lines[i], LV_OBJ_FLAG_HIDDEN);
+
+  /* ---- destination dot marker (end point of destination segment) --- */
+  if (map_marker) {
+    lv_obj_add_flag(map_marker, LV_OBJ_FLAG_HIDDEN);
+    for (int si = 0; si < fr->seg_count; si++) {
+      if (fr->segs[si].type != MAP_SEG_DESTINATION) continue;
+      int last = fr->segs[si].npts - 1;
+      double x = fr->segs[si].points[last * 2 + 0];
+      double y = fr->segs[si].points[last * 2 + 1];
+      double rx =  x * ct + y * st;
+      double ry = -x * st + y * ct;
+      lv_coord_t ex = (lv_coord_t)lrint(rx + 240.0);
+      lv_coord_t ey = (lv_coord_t)lrint(ry + 240.0);
+      lv_obj_remove_flag(map_marker, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_set_pos(map_marker, ex - 12, ey - 12);
+      break;
+    }
+  }
+
+  /* ---- vehicle marker --------------------------------------------- */
+  if (map_vehicle) {
+    if (!show_vehicle) {
+      lv_obj_add_flag(map_vehicle, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_remove_flag(map_vehicle, LV_OBJ_FLAG_HIDDEN);
+      /* The world is already rotated onto the screen; the vehicle
+         marker sits at screen centre and stays as-is. */
+    }
+  }
+
+  /* ---- scale bar + caption ---------------------------------------- */
+  bool show_scale = (fr->flags & MAP_FLAG_SCALE_BAR) != 0 && fr->scale > 0;
+  if (show_scale) {
+    lv_obj_remove_flag(map_scale, LV_OBJ_FLAG_HIDDEN);
+    int meters = (int)((100 * 100) / fr->scale);
+    if (meters < 1) meters = 1;
+  } else {
+    lv_obj_add_flag(map_scale, LV_OBJ_FLAG_HIDDEN);
+  }
+
+  if (map_label) {
+    char txt[64];
+    int heading_deg = (int)(fr->heading / 10);
+    if (show_scale) {
+      int meters = (int)((100 * 100) / fr->scale);
+      snprintf(txt, sizeof txt, "%d°   |   %d m", heading_deg, meters);
+    } else {
+      snprintf(txt, sizeof txt, "%d°   |   %u Seg.", heading_deg, (unsigned)fr->seg_count);
+    }
+    lv_label_set_text(map_label, txt);
+    lv_obj_remove_flag(map_label, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
 static void on_ble_map_frame(const void *data, size_t len) {
   const uint8_t *f = (const uint8_t *)data;
 
-  if (len < 11) {
-    map_drop_count++;
-    Serial.printf("[MAP] drop: %u B (header needs 11)\n", (unsigned)len);
-    publish_status();
-    return;
-  }
-
-  uint16_t magic = (uint16_t)(f[0] | (f[1] << 8));
-  uint8_t  ver   = f[2];
-  uint8_t  seq   = f[3];
-  if (magic != MAP_MAGIC) {
-    map_drop_count++;
-    Serial.printf("[MAP] drop: magic 0x%04X != 0x%04X\n", magic, MAP_MAGIC);
-    publish_status();
-    return;
-  }
-  if (ver != 1) {
-    map_drop_count++;
-    Serial.printf("[MAP] drop: ver %u (want 1)\n", ver);
-    publish_status();
-    return;
-  }
   if (len > MAP_FRAME_MAX) {
     map_drop_count++;
     Serial.println("[MAP] drop: > 4 KB");
@@ -566,21 +756,34 @@ static void on_ble_map_frame(const void *data, size_t len) {
     return;
   }
 
+  /* decode first (bounds-checks all bytes, returns false on any error) */
+  static MapFrame fr;   /* ~7 KB — lives in .bss, off the app-task stack */
+  if (!parse_map_frame(f, len, &fr)) {
+    map_drop_count++;
+    Serial.printf("[MAP] drop: parse error (%u B)\n", (unsigned)len);
+    publish_status();
+    return;
+  }
+
   /* seq handling (spec §6): duplicate ignored, >64 older = stale */
   if (map_seq_seen) {
-    int8_t d = (int8_t)(seq - map_seq_last);
+    int8_t d = (int8_t)(fr.seq - map_seq_last);
     if (d == 0) return;              /* duplicate — no log, no counter */
     if (d < -64) {
       map_drop_count++;
-      Serial.printf("[MAP] drop: seq %u stale (last %u)\n", seq, map_seq_last);
+      Serial.printf("[MAP] drop: seq %u stale (last %u)\n", fr.seq, map_seq_last);
       publish_status();
       return;
     }
   }
-  /* forward or new frame: accept */
-  map_seq_last = seq;
+  map_seq_last = fr.seq;
   map_seq_seen = true;
-  Serial.printf("[MAP] frame seq=%u accepted (%u B)\n", seq, (unsigned)len);
+  Serial.printf("[MAP] frame seq=%u accepted (%u B, %u segs, heading %d)\n",
+                fr.seq, (unsigned)len, (unsigned)fr.seg_count, (int)fr.heading);
+
+  /* render — only when the map screen is up (frames can arrive any time) */
+  if (active_screen == map_screen) render_map_frame(&fr);
+
   publish_status();
 }
 
@@ -702,9 +905,115 @@ static void toast_debug(const char *text, lv_color_t color, uint32_t ms) {
 }
 
 /*---------------------------------------------------------------
+ * MapData self-test generator (C.1c)
+ *   Serial commands:
+ *     mt0   frame 0 — heading 0°,  route straight ahead + cross road
+ *     mt1   frame 1 — heading 35° (left-ish turn), route curves
+ *     mt2   frame 2 — heading 90° (east), long straight
+ *     mt3   frame 3 — scale bar on, 4 px/m, destination marker
+ *   Each command builds a binary frame and pushes it through the
+ *   REAL firmware path (on_ble_map_frame → parse → render → screen).
+ *   No phone, no BLE connection needed.
+ *--------------------------------------------------------------*/
+
+static void put_u16le(uint8_t *p, uint16_t v) { p[0] = v & 0xFF; p[1] = v >> 8; }
+static void put_i16le(uint8_t *p, int16_t v)  { put_u16le(p, (uint16_t)v); }
+
+static void map_put_seg(uint8_t **pp, uint8_t type, uint8_t width,
+                        const int16_t *xy, int n) {
+  uint8_t *p = *pp;
+  p[0] = type; p[1] = width; p[2] = (uint8_t)n;
+  p += 3;
+  for (int i = 0; i < n; i++) {
+    int16_t dx = (i == 0) ? xy[2*i]   : (int16_t)((int16_t)xy[2*i]   - xy[2*i-2]);
+    int16_t dy = (i == 0) ? xy[2*i+1] : (int16_t)((int16_t)xy[2*i+1] - xy[2*i-1]);
+    put_i16le(p, dx); p += 2; put_i16le(p, dy); p += 2;
+  }
+  *pp = p;
+}
+
+static void map_send_demo(uint8_t seq, uint8_t scenario, int16_t heading,
+                          uint16_t flags, uint16_t scale) {
+  static uint8_t buf[2048];
+  uint8_t *p = buf;
+  put_u16le(p, 0x4D4C); p += 2;                 /* magic */
+  *p++ = 1;                                     /* ver   */
+  *p++ = seq;                                   /* seq   */
+  put_u16le(p, flags); p += 2;                  /* flags */
+  put_i16le(p, heading); p += 2;                /* heading (deg × 10) */
+  put_u16le(p, scale); p += 2;                  /* px_per_m × 100    */
+
+  /* segment plan depends on the scenario (NOT on seq — see §6) */
+  if (scenario == 0) {
+    /* heading 0°: route straight ahead (world -y), cross road east–west */
+    *p++ = 2;                                   /* 2 segments */
+    static const int16_t road[8]  = {-200,-40, 200,-40};             /* y=-40 */
+    static const int16_t route[12] = {0,0, 0,-70, 0,-140, 0,-210, 0,-280};
+    map_put_seg(&p, 2, 12, road,  2);           /* road, 12 px total */
+    map_put_seg(&p, 1, 10, route, 5);           /* route, 10 px      */
+  } else if (scenario == 1) {
+    /* heading 35°, route curving ahead-left, one branch */
+    *p++ = 3;                                   /* 3 segments */
+    static const int16_t roadA[8]  = {-180,-120, 160,-200};
+    static const int16_t route[10] = {0,0, -20,-60, -60,-120, -120,-170};
+    static const int16_t branch[6] = {-60,-120, 80,-140};
+    map_put_seg(&p, 2, 12, roadA,  2);
+    map_put_seg(&p, 3, 8, branch, 2);
+    map_put_seg(&p, 1, 10, route,  4);
+  } else if (scenario == 2) {
+    /* heading 90° (east): long straight, two parallel cross roads */
+    *p++ = 3;                                   /* 3 segments */
+    static const int16_t road1[6] = {60,-200, 60,220};
+    static const int16_t road2[6] = {-140,-220, -140,240};
+    static const int16_t route[14] = {0,0, 70,0, 140,0, 210,0, 280,0};
+    map_put_seg(&p, 2, 12, road1, 2);
+    map_put_seg(&p, 2, 12, road2, 2);
+    map_put_seg(&p, 1, 10, route, 5);
+  } else if (scenario == 3) {
+    /* scale-bar demo + destination dot ahead */
+    *p++ = 2;                                   /* 2 segments */
+    static const int16_t road[6] = {-220,0, 220,0};
+    static const int16_t dest[4] = {0,0, 0,-160};
+    map_put_seg(&p, 2, 16, road, 2);
+    map_put_seg(&p, 4, 3, dest, 2);             /* destination */
+  } else {
+    /* fallback: single straight route */
+    *p++ = 1;                                   /* 1 segment */
+    static const int16_t route[8] = {0,0, 0,-100, 0,-200};
+    map_put_seg(&p, 1, 10, route, 3);
+  }
+
+  size_t len = (size_t)(p - buf);
+  Serial.printf("[MT] demo scenario=%u seq=%u heading=%d° flags=0x%04X scale=%u → %u B\n",
+                scenario, seq, (int)(heading/10), flags, scale, (unsigned)len);
+  on_ble_map_frame(buf, len);
+}
+
+static void handle_map_test(const char *line) {
+  int scenario = atoi(line + 2);   /* "mt<0-3>" → scenario 0..3 */
+  const uint16_t ROT  = 1u << 0;
+  const uint16_t SCL  = 1u << 1;
+  const uint16_t VEH  = 1u << 2;
+  /* monotonic seq: a duplicate seq is a no-op per protocol §6, so the
+     self-test must keep counting (also proves multi-frame rendering). */
+  static uint8_t mt_seq = 0;
+  uint8_t seq = mt_seq++;
+  switch (scenario) {
+    case 0: map_send_demo(seq, 0,   0, ROT|VEH, 20);  break;
+    case 1: map_send_demo(seq, 1, 350, ROT|VEH, 20);  break;
+    case 2: map_send_demo(seq, 2, 900, ROT|VEH, 20);  break;
+    case 3: map_send_demo(seq, 3,   0, ROT|VEH|SCL, 50); break;
+    default:
+      Serial.println("[MT] unknown — use mt0 mt1 mt2 mt3"); return;
+  }
+  if (active_screen != map_screen) goto_screen(map_screen, "map (self-test)");
+}
+
+/*---------------------------------------------------------------
  * Serial debug channel (until BLE + phone app are in)
  *   h / n / m              → home / nav / map (quick jump)
  *   b<0-100>               → brightness
+ *   mt0..mt3               → MapData self-test frames (C.1c)
  *   {"v":1,"t":...}        → NavData frame (protocol.md §2),
  *                            e.g. {"v":1,"t":"nav","maneuver":"left",
  *                                  "dist_m":350,"text":"Main St."}
@@ -736,6 +1045,9 @@ static void handle_serial(void) {
 
       if (line[0] == 'h')                 goto_screen(home_screen, "home");
       else if (line[0] == 'n')            goto_screen(nav_screen, "nav");
+      else if (line[0] == 'm' && line[1] == 't') {
+        handle_map_test(line);            /* 'mt' must precede the 'm' test */
+      }
       else if (line[0] == 'm')            goto_screen(map_screen, "map");
       else if (line[0] == 'b') {
         apply_brightness(atoi(line + 1));

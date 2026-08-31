@@ -66,7 +66,7 @@ extern "C" bool parse_map_frame(const uint8_t *buf, size_t len, struct MapFrame 
     off += 3;
 
     if (type < MAP_SEG_ROUTE || type > MAP_SEG_DESTINATION) return false;
-    if (width < 1 || width > 8) return false;
+    if (width < 1 || width > 16) return false;
     if (npts < 2 || npts > MAP_MAX_PTS) return false;
 
     size_t need = (size_t)npts * 4;                /* i16 dx + i16 dy  */

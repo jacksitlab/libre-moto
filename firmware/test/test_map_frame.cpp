@@ -110,7 +110,7 @@ int main() {
   put_hdr(b, MAP_MAGIC, MAP_VER, 0, 0, 0, 0, 1);
   std::vector<pt> big(MAP_MAX_PTS);
   for (int i = 0; i < MAP_MAX_PTS; i++) big[i] = { (int16_t)(i*2), 0 }; /* step 2 */
-  put_seg(b, MAP_SEG_ROUTE, 8, big.data(), MAP_MAX_PTS); /* width max 8 */
+  put_seg(b, MAP_SEG_ROUTE, 16, big.data(), MAP_MAX_PTS); /* width max 16 */
   CHECK(parse_map_frame(b.data(), b.size(), &f), "3b: 120-point segment parses");
   CHECK(f.segs[0].npts == MAP_MAX_PTS, "3b: 120 pts accepted");
   CHECK(f.segs[0].points[MAP_MAX_PTS*2-2] == (MAP_MAX_PTS-1)*2, "3b: last x point");
@@ -154,9 +154,17 @@ int main() {
   {
     b.clear();
     put_hdr(b, MAP_MAGIC, MAP_VER, 0, 0, 0, 0, 1);
-    put_u8(b, 1); put_u8(b, 9 /*width 9*/); put_u8(b, 2);
+    put_u8(b, 1); put_u8(b, 17 /*width 17 */); put_u8(b, 2);
     put_i16(b, 0); put_i16(b, 0); put_i16(b, 10); put_i16(b, 10);
-    CHECK(!parse_map_frame(b.data(), b.size(), &f), "4: width 9 rejected");
+    CHECK(!parse_map_frame(b.data(), b.size(), &f), "4: width 17 rejected");
+  }
+  {
+    b.clear();
+    put_hdr(b, MAP_MAGIC, MAP_VER, 0, 0, 0, 0, 1);
+    put_u8(b, 1); put_u8(b, 16 /*width 16*/); put_u8(b, 2);
+    put_i16(b, 0); put_i16(b, 0); put_i16(b, 10); put_i16(b, 10);
+    CHECK(parse_map_frame(b.data(), b.size(), &f), "4: width 16 accepted");
+    CHECK(f.segs[0].width == 16, "4: width 16 round-trips");
   }
   {
     b.clear();

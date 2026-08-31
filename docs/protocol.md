@@ -98,7 +98,9 @@ Offset  Size   Field        Type    Description
 SEGMENT:
   rel offset   Size   Field    Type    Description
   0              1      type   u8      1=route, 2=road, 3=branch, 4=destination
-  1              1      width  u8      line width 1..8 px
+  1              1      width  u8      road width 1..16 px (route: line width;
+                                      road/branch: distance between the two
+                                      rendered edge lines)
   2              1      npts   u8      point count (2..120)
   3              2×npts px[]  i16     dx, dy — delta-encoded (1st point absolute,
                                        subsequent: dx/dy relative to previous point)
