@@ -96,14 +96,6 @@ The Arduino IDE project is the `firmware/src/libre-moto` folder (the `.ino` file
 - Phone app (Phase C): Kotlin, minSdk 28, targetSdk 34, Gradle.
 - License: **GPLv3** (firmware **and** phone app). Copyleft deliberately chosen.
 
-## Tests
-
-```
-cd firmware/test
-g++ -std=c++11 -Wall -Wextra -Werror -O2 -I../src/nav test_nav_message.cpp -o test_nav_message && ./test_nav_message
-g++ -std=c++11 -Wall -Wextra -Werror -O2 -I../src/map test_map_frame.cpp -o test_map_frame   && ./test_map_frame
-```
-
 ## License
 
 [GNU GPLv3](LICENSE) — all source code is open source; redistribution/forks are only allowed under GPLv3 (intentional: no closed product).

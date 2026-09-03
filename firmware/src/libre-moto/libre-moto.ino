@@ -71,6 +71,31 @@ static bool     map_seq_seen = false; /* any OK frame yet?     */
 static bool     ble_ready = false;    /* BLE link module up    */
 static unsigned long state_until_ms = 0;
 
+/* TEMPORARY — do NOT commit.  Serial-Console diagnostic. */
+static uint32_t      serial_rx_bytes = 0;
+static unsigned long serial_last_byte_ms = 0;
+static lv_obj_t     *serial_status_label = NULL;
+
+static void serial_status_update(void) {
+  if (!serial_status_label) return;
+  uint32_t avail = (uint32_t)Serial.available();
+  unsigned long age = (millis() > serial_last_byte_ms)
+                         ? (unsigned long)(millis() - serial_last_byte_ms)
+                         : 0;
+  if (serial_rx_bytes == 0)
+    lv_label_set_text_fmt(serial_status_label,
+      "SERIAL:  no bytes yet\n"
+      "  check:  USB-CDC?  baud 115200?\n"
+      "  monitor:  115200  NL=New Line");
+  else
+    lv_label_set_text_fmt(serial_status_label,
+      "SERIAL:  %lu B  avail=%lu\n"
+      "  last byte:  %lu ms ago",
+      (unsigned long)serial_rx_bytes,
+      (unsigned long)avail,
+      (unsigned long)age);
+}
+
 /* colors (dark theme, see docs/design.md) */
 static const lv_color_t C_BG      = lv_color_hex(0x0D1117);
 static const lv_color_t C_TEXT    = lv_color_hex(0xE6EDF3);
@@ -218,6 +243,15 @@ static void create_home_screen(void) {
   lv_obj_remove_flag(bright_bar, LV_OBJ_FLAG_CLICKABLE);
   lv_bar_set_range(bright_bar, 0, 100);
   lv_bar_set_value(bright_bar, brightness_pct, LV_ANIM_OFF);
+
+  /* TEMPORARY — do NOT commit.  Serial diagnostic label. */
+  serial_status_label = lv_label_create(home_screen);
+  lv_obj_set_style_text_font(serial_status_label, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_color(serial_status_label, C_ACCENT, 0);
+  lv_obj_set_width(serial_status_label, 460);
+  lv_label_set_text(serial_status_label, "SERIAL:  checking…");
+  lv_obj_align(serial_status_label, LV_ALIGN_CENTER, 0, 165);
+  /* ------------------------- END TEMPORARY ------------------- */
 }
 
 /* Maneuver arrow (lv_line, 120\u00d7120 box at object pos) */
@@ -1035,6 +1069,9 @@ static void handle_serial(void) {
 
   while (Serial.available()) {
     char c = Serial.read();
+    /* temporary diagnostic — do NOT commit */
+    serial_rx_bytes++;
+    serial_last_byte_ms = millis();
     if (c == '\n' || c == '\r') {
       if (li == 0) continue;
       line[li] = 0;
@@ -1265,6 +1302,13 @@ void loop() {
   ble_link_poll();          /* drain NavData/Control/MapData queues, adv state */
   handle_gesture_state();
   handle_state_timeouts();
+  /* TEMPORARY — do NOT commit.  Update serial status label every 500 ms. */
+  static unsigned long last_ser_status = 0;
+  if (millis() - last_ser_status >= 500) {
+    last_ser_status = millis();
+    serial_status_update();
+  }
+  /* ------------------------- END TEMPORARY block --------------- */
   lv_timer_handler();
   delay(5);
 }
