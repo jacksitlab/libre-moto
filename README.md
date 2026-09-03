@@ -4,13 +4,17 @@ Open-source alternative to [Beeline Moto II](https://beeline.co/pages/beeline-mo
 
 The display receives navigation data (turn instructions + a minimalistic vector map) via **Bluetooth Low Energy** from a smartphone (osmAnd + companion app) and shows them **glove-friendly** and **without distraction** — in the style of Beeline Moto II.
 
-## Status: In development (Phase A — Display & UI bring-up)
+The board ships with a **serial self-test** (`mt0`–`mt3`) that drives the full BLE pipeline from a terminal, so you can verify the map renderer, state machine, and touch UI without a phone. See `firmware/README_TESTS.md`.
+
+## Status: Phases A + B.1 done. Next: Android companion app (C.2)
 
 - [x] **Phase 0** — Protocol & hardware specs, repo structure, starter firmware
-- [ ] **Phase A** — Display & UI bring-up (Arduino_GFX + LVGL, map renderer, state machine)
-- [ ] **Phase B** — BLE GATT server (NimBLE) + robustness
-- [ ] **Phase C** — Android companion app (osmAnd provider reader + BLE client + map projection)
-- [ ] **Phase D** — UX polish (brightness, auto-dim, auto-off)
+- [x] **Phase A** — Display & UI (Arduino_GFX + LVGL 9.5, touch gestures, state machine)
+- [x] **Phase B** — BLE GATT server (NavData, Status, MapData, Control) + heartbeat
+- [x] **C.1** — MapData binary parser + LVGL map renderer (roads as twin-edge lines, route as filled white line)
+- [ ] **C.2** — **Android companion app** (Kotlin, XML, osmAnd provider reader + BLE client + map projection)  ← **next**
+- [ ] **B.2** — Robustness & stress tests (100 writes/5s, reconnect <5s)
+- [ ] **Phase D** — UX polish (auto-dim, auto-off, transitions)
 - [ ] **Phase E** — v0.1.0 release (firmware + APK)
 
 ## Architecture decision
@@ -54,10 +58,15 @@ Details in [`docs/hardware.md`](docs/hardware.md).
 │   ├── src/libre-moto/
 │   │   ├── libre-moto.ino   # main sketch (Arduino IDE project = this folder)
 │   │   └── config.h         # pins, display init, settings
-│   └── libraries/           # vendored Arduino libraries (GFX_Library_for_Arduino,
-│                            #   lvgl 9.1 + lv_conf.h, Adafruit_CST8XX_Library,
-│                            #   Adafruit_BusIO, PCF8574_library)
-└── phone/                   # (Phase C) Android companion app (Kotlin)
+│   ├── src/nav/             # NavState struct + hand-rolled JSON parser + tests
+│   ├── src/ble/             # GATT server (NavData, Status, MapData, Control)
+│   ├── src/map/             # MapData binary frame (protocol.md §4)
+│   ├── test/                # native C++ unit tests (g++ — no Arduino needed)
+│   ├── libraries/           # vendored Arduino libraries (GFX_Library_for_Arduino,
+│   │                        #   lvgl 9.5.0 + lv_conf.h, Adafruit_CST8XX_Library,
+│   │                        #   Adafruit_BusIO, PCF8574_library)
+│   └── README_TESTS.md      # how to build & run the native unit tests
+└── phone/                   # (Phase C) Android companion app (Kotlin, XML layout)
 ```
 
 ## Setup Dev Env
@@ -83,18 +92,37 @@ The Arduino IDE project is the `firmware/src/libre-moto` folder (the `.ino` file
 | Phase | Goal | Gate |
 |---|---|---|
 | **0** ✅ | Docs, protocol, repo structure, starter sketch | These files complete + basic display init works |
-| **A** | Display, UI, map renderer, state machine **without** phone | Serial mock shows all screens |
-| **B** | BLE server, heartbeat, reconnect, stress test | 100 BLE writes / 5 s, reconnect <5 s |
-| **C** | Android companion (osmAnd + BLE) | E2E: osmAnd live → display + map |
-| **D** | UX polish (brightness, auto-dim, auto-off) | Brightness via swipe, auto-dim after 30 s |
+| **A** ✅ | Display, UI, map renderer, state machine **without** phone | Serial mock shows all screens |
+| **B** ✅ (B.1) | BLE server, heartbeat, reconnect, stress test | GATT server verified end-to-end with nRF Connect (B.2 stress pending) |
+| **C** 🚧 | Android companion (osmAnd + BLE) | C.1: map renderer done. C.2: app (Kotlin, XML, Android 10+) — **next** |
+| **D** | UX polish (brightness, auto-dim, auto-off) | Brightness via swipe (done as debug), auto-dim after 30 s |
 | **E** | **v0.1.0** release | Firmware binary + APK, GitHub release |
 
 ## Development
 
-- Firmware: **Arduino IDE 2.X** (project folder `firmware/src/libre-moto`), vendored libs in `firmware/libraries/` (GFX_Library_for_Arduino, lvgl 9.1, Adafruit_CST8XX_Library, Adafruit_BusIO, PCF8574_library).
-- Libraries to add in later phases: `NimBLE-Arduino` (Phase B), `ArduinoJson` (Phase B).
-- Phone app (Phase C): Kotlin, minSdk 28, targetSdk 34, Gradle.
-- License: **GPLv3** (firmware **and** phone app). Copyleft deliberately chosen.
+### Firmware
+
+- **Toolchain:** Arduino IDE 2.X (or `arduino-cli`). Project folder = `firmware/src/libre-moto/`.
+- **Core:** [esp32](https://github.com/espressif/arduino-esp32) ≥ 3.3 (BLE via classic Bluedroid API — see `firmware/src/ble/`).
+- **Display:** [Arduino_GFX](https://github.com/moononournation/Arduino_GFX) + [LVGL 9.5](https://lvgl.io) (vendored, `LV_USE_FLOAT=0` → all coordinates are `int32_t`).
+- **Touch:** [Adafruit_CST8XX_Library](https://github.com/adafruit/Adafruit_CST8XX) (CST816).
+- **I/O expander (LCD touch reset/IRQ):** PCF8574 (I²C 0x21, [PCF8574_library](https://github.com/robotics-community/PCF8574_library)).
+- **JSON parsing:** hand-rolled (no ArduinoJson) — see `firmware/src/nav/nav_message_parse_impl.h`. This keeps the firmware build free of template bloat.
+- **Native unit tests (no hardware needed):**
+  ```bash
+  cd firmware/test
+  g++ -std=c++11 -Wall -Wextra -Werror -O2 -I../src/nav test_nav_message.cpp -o /tmp/tnm && /tmp/tnm
+  g++ -std=c++11 -Wall -Wextra -Werror -O2 -I../src/map test_map_frame.cpp  -o /tmp/tmf && /tmp/tmf
+  ```
+  Full guide in [`firmware/README_TESTS.md`](firmware/README_TESTS.md).
+
+### Phone app (Phase C, next)
+
+- **Language:** Kotlin, classic XML layouts (no Jetpack Compose).
+- **Android:** `minSdk 29` (Android 10), `targetSdk 34` (Android 14).
+- **Navigation source:** osmAnd (read route + nav data from osmAnd's routing state; fallback to a generic "NavProvider" interface so other apps can be added later).
+- **Build system:** Gradle Kotlin DSL, single module, BLE via Android platform `BluetoothLeScanner`.
+- **License:** GPLv3 (firmware **and** phone app). Copyleft deliberately chosen.
 
 ## License
 
@@ -104,8 +132,8 @@ The Arduino IDE project is the `firmware/src/libre-moto` folder (the `.ino` file
 
 - Hardware: [Elecrow CrowPanel 2.1"](https://www.elecrow.com/crowpanel-2-1inch-hmi-esp32-rotary-display-480-480-ips-round-touch-knob-screen.html)
 - Display stack: [Arduino_GFX](https://github.com/moononournation/Arduino_GFX), [LVGL 9](https://lvgl.io)
-- BLE: [NimBLE-Arduino](https://github.com/h2zero/NimBLE-Arduino)
-- Touch: [Adafruit_TFT_Touch / CST8XX](https://github.com/adafruit/Adafruit_CST8XX)
+- BLE: classic **Bluedroid API** shipped with [esp32-arduino](https://github.com/espressif/arduino-esp32) core ≥ 3.3 (see `firmware/src/ble/ble_link.h`)
+- Touch: [Adafruit CST8XX](https://github.com/adafruit/Adafruit_CST8XX)
 - Navigation engine: [osmAnd](https://osmand.net)
 - Design reference: [Beeline Moto II](https://beeline.co/pages/beeline-moto)
 
