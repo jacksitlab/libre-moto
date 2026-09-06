@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.LibreMoto" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">#FE6B13</item>
+        <item name="colorOnPrimary">#000000</item>
+        <item name="colorSecondary">#8A6D3B</item>
+        <item name="colorOnSecondary">#000000</item>
+        <item name="android:statusBarColor">#000000</item>
+        <item name="android:windowBackground">#000000</item>
+        <item name="android:textColor">#FFFFFF</item>
+        <item name="android:textColorPrimary">#FFFFFF</item>
+    </style>
+</resources>

@@ -1,0 +1,12 @@
+# LibreMoto app — local build artifacts
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+
+# OsmAnd AIDL API vendor copy — generated/compiled by the AIDL plugin;
+# keep the vendorized .aidl/.java sources (they ARE the API contract),
+# but ignore the generated Java stubs Android builds from them.
+src/main/aidl/

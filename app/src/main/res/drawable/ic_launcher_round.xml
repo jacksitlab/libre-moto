@@ -1,0 +1,17 @@
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools">
+<background android:drawable="@color/black"/>
+  <foreground >
+    <inset android:drawable="@drawable/ic_launcher"
+        android:insetBottom="30dp"
+        android:insetLeft="30dp"
+        android:insetRight="30dp"
+        android:insetTop="30dp"
+        >
+
+
+
+    </inset>
+  </foreground>
+</adaptive-icon>

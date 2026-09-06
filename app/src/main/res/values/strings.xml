@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">LibreMoto</string>
+    <string name="btn_bluetooth">Suchen &amp; Verbinde</string>
+    <string name="btn_status">Status lesen</string>
+    <string name="btn_send_nav">Nav senden</string>
+    <string name="btn_send_map">Map senden</string>
+    <string name="btn_beep">Heartbeat</string>
+    <string name="btn_stream">Stream start/stopp</string>
+    <string name="btn_control_idle">Board → Idle</string>
+    <string name="btn_disconnect">Trennen</string>
+    <string name="lbl_ble">Bluetooth</string>
+    <string name="lbl_source">Nav-Quelle</string>
+    <string name="lbl_map_on">Karte zeigen</string>
+    <string name="lbl_log">Log</string>
+    <string name="src_mock">Demo-Route (Mock)</string>
+    <string name="src_osmand">osmAnd (AIDL)</string>
+</resources>

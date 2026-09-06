@@ -6,13 +6,13 @@ The display receives navigation data (turn instructions + a minimalistic vector 
 
 The board ships with a **serial self-test** (`mt0`–`mt3`) that drives the full BLE pipeline from a terminal, so you can verify the map renderer, state machine, and touch UI without a phone. See `firmware/README_TESTS.md`.
 
-## Status: Phases A + B.1 done. Next: Android companion app (C.2)
+## Status: Phases A + B.1 + C.1 + C.2 (app v1) done. Next: on-device bring-up + B.2
 
 - [x] **Phase 0** — Protocol & hardware specs, repo structure, starter firmware
 - [x] **Phase A** — Display & UI (Arduino_GFX + LVGL 9.5, touch gestures, state machine)
 - [x] **Phase B** — BLE GATT server (NavData, Status, MapData, Control) + heartbeat
 - [x] **C.1** — MapData binary parser + LVGL map renderer (roads as twin-edge lines, route as filled white line)
-- [ ] **C.2** — **Android companion app** (Kotlin, XML, osmAnd provider reader + BLE client + map projection)  ← **next**
+- [x] **C.2** — **Android companion app** (Kotlin, XML, BLE client, osmAnd AIDL + Mock sources, byte-exact encoders) — next: on-device BLE bring-up
 - [ ] **B.2** — Robustness & stress tests (100 writes/5s, reconnect <5s)
 - [ ] **Phase D** — UX polish (auto-dim, auto-off, transitions)
 - [ ] **Phase E** — v0.1.0 release (firmware + APK)
@@ -66,8 +66,22 @@ Details in [`docs/hardware.md`](docs/hardware.md).
 │   │                        #   lvgl 9.5.0 + lv_conf.h, Adafruit_CST8XX_Library,
 │   │                        #   Adafruit_BusIO, PCF8574_library)
 │   └── README_TESTS.md      # how to build & run the native unit tests
-└── phone/                   # (Phase C) Android companion app (Kotlin, XML layout)
+└── app/                     # Android companion app (Kotlin, classic XML, minSdk 29)
+    ├── build.gradle.kts     # Gradle Kotlin DSL, single module
+    ├── src/main/java/dev/jacklibre/libremoto/
+    │   ├── MainActivity.kt  # UI + BLE + NavSource wiring
+    │   ├── ble/BleController.kt   # GATT client (scan, MTU, notify, writes)
+    │   ├── protocol/NavData.kt    # JSON encoder (protocol.md §2)
+    │   ├── protocol/MapFrame.kt   # binary frame encoder (protocol.md §4)
+    │   └── bridge/
+    │       ├── NavSource.kt       # data contract for the BLE sender
+    │       ├── MockNavSource.kt   # canned route — bring-up without osmAnd
+    │       └── OsmAndNavSource.kt # live nav data via osmAnd AIDL API
+    │   └── src/main/aidl/net/osmand/aidl/  # vendored osmAnd AIDL API (client copy, self-contained)
+    └── src/test/.../protocol/MapFrameTest.kt  # byte-exact encoder unit tests
 ```
+
+The osmAnd AIDL client copy lives under `app/src/main/aidl/net/osmand/aidl/` (156 self-contained `.aidl` + `.java` sources, no `OsmAnd-core` dependency, same shape as OsmAnd's own [Telegram module](https://github.com/osmandapp/OsmAnd/tree/master/OsmAnd-telegram)).
 
 ## Setup Dev Env
 
@@ -94,7 +108,7 @@ The Arduino IDE project is the `firmware/src/libre-moto` folder (the `.ino` file
 | **0** ✅ | Docs, protocol, repo structure, starter sketch | These files complete + basic display init works |
 | **A** ✅ | Display, UI, map renderer, state machine **without** phone | Serial mock shows all screens |
 | **B** ✅ (B.1) | BLE server, heartbeat, reconnect, stress test | GATT server verified end-to-end with nRF Connect (B.2 stress pending) |
-| **C** 🚧 | Android companion (osmAnd + BLE) | C.1: map renderer done. C.2: app (Kotlin, XML, Android 10+) — **next** |
+| **C** ✅ | Android companion (osmAnd + BLE) | C.1: map renderer ✓ · C.2: app v1 ✓ (ble, mock+osmand sources, encoders) — auf dem Gerät ausrollen |
 | **D** | UX polish (brightness, auto-dim, auto-off) | Brightness via swipe (done as debug), auto-dim after 30 s |
 | **E** | **v0.1.0** release | Firmware binary + APK, GitHub release |
 
@@ -116,12 +130,17 @@ The Arduino IDE project is the `firmware/src/libre-moto` folder (the `.ino` file
   ```
   Full guide in [`firmware/README_TESTS.md`](firmware/README_TESTS.md).
 
-### Phone app (Phase C, next)
+### Phone app (Phase C — implemented in `app/`)
 
 - **Language:** Kotlin, classic XML layouts (no Jetpack Compose).
 - **Android:** `minSdk 29` (Android 10), `targetSdk 34` (Android 14).
-- **Navigation source:** osmAnd (read route + nav data from osmAnd's routing state; fallback to a generic "NavProvider" interface so other apps can be added later).
-- **Build system:** Gradle Kotlin DSL, single module, BLE via Android platform `BluetoothLeScanner`.
+- **Navigation source contract:** `bridge.NavSource` — swappable
+  - `MockNavSource` — deterministic canned route (device bring-up, no osmAnd, no GPS).
+  - `OsmAndNavSource` — reads turn text + distance + battery live from osmAnd via the official **AIDL API** (`net.osmand.aidl.OsmandAidlService`), no Broadcast-parsing, no proprietary core.
+  - A third source (Organic Maps, Navit, …) needs no BLE changes.
+- **Wire format:** `protocol.NavData` (JSON, protocol §2) + `protocol.MapFrame` (binary, §4) — byte-exact mirrors of the firmware, cross-checked by `firmware/test/test_cross_kotlin.cpp`.
+- **Build system:** Gradle 8 + Kotlin DSL, single module, `local.properties` pins the SDK path.
+- **BLE:** platform `BluetoothLeScanner` + `BluetoothGatt`, MTU 512 (fallback 23), MapData chunked to fit.
 - **License:** GPLv3 (firmware **and** phone app). Copyleft deliberately chosen.
 
 ## License
