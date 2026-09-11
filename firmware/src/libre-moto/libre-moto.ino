@@ -5,10 +5,12 @@
 #include <PCF8574.h>
 #include <Preferences.h>
 #include <math.h>
+#include <FreeRTOS.h>
 #include "config.h"
 #include "../nav/nav_message.h" /* NavData + Control protocol v1 (protocol.md §2, §5) */
 #include "../ble/ble_link.h"   /* GATT server: NavData/Status/MapData/Control         */
 #include "../map/map_frame.h"  /* MapData binary frames (protocol.md §4)              */
+#include "../map/map_render.h" /* prepare_map_frame(): geometry stage (comm thread)   */
 
 /*---------------------------------------------------------------
  * Hardware (CrowPanel 2.1" — see docs/hardware.md)
@@ -70,6 +72,57 @@ static uint32_t map_drop_count = 0;   /* dropped/stale/incomplete frames */
 static bool     map_seq_seen = false; /* any OK frame yet?     */
 static bool     ble_ready = false;    /* BLE link module up    */
 static unsigned long state_until_ms = 0;
+
+/*---------------------------------------------------------------
+ * Threading hand-off (comm task → display task)
+ *
+ * Two FreeRTOS tasks split the work so a big MapData frame never
+ * blocks the screen:
+ *
+ *   COMM task (comm_task): ble_link_poll() → parse → geometry
+ *     (prepare_map_frame). Publishes:
+ *       - g_map_out  : latest prepared MapRenderFrame (mutex)
+ *       - ui_q       : parsed NavState / CtrlState (mutex)
+ *     NO LVGL calls on this task.
+ *
+ *   DISPLAY task (Arduino loop): drains ui_q, blits the prepared
+ *     map frame into the LVGL pool, handles touch/gestures, state
+ *     timeouts and lv_timer_handler(). ALL LVGL calls live here.
+ *
+ * Serial stays on the display task (debug channel, calls UI
+ * directly).
+ *--------------------------------------------------------------*/
+static xSemaphoreHandle g_map_mux = NULL;   /* guards g_map_out + g_map_ready */
+static MapRenderFrame g_map_out;            /* ~29 KB — lives in .bss */
+static volatile bool   g_map_ready = false; /* a prepared frame is waiting */
+
+static xSemaphoreHandle g_ui_mux = NULL;    /* guards the ui_q ring */
+static xSemaphoreHandle g_map_parse_mux = NULL; /* serializes on_ble_map_frame
+                                                  (BLE comm task + serial mock
+                                                  share the static MapFrame) */
+#define UI_Q_SIZE 16
+struct ui_msg {
+  int      kind;   /* UI_MSG_NAV / UI_MSG_CTRL */
+  NavState nav;    /* valid when kind == UI_MSG_NAV */
+  CtrlState ctrl;  /* valid when kind == UI_MSG_CTRL */
+};
+static struct ui_msg ui_q[UI_Q_SIZE];
+static uint16_t ui_head = 0, ui_tail = 0, ui_free = 0;
+
+enum { UI_MSG_NAV = 1, UI_MSG_CTRL };
+
+/* Comm task → display task: enqueue a parsed message. Drops when the
+   ring is full (the display task drains every loop iteration). */
+static void ui_push(const struct ui_msg *m) {
+  if (g_ui_mux == NULL) return;
+  xSemaphoreTake(g_ui_mux, portMAX_DELAY);
+  if (ui_free > 0) {
+    ui_q[ui_head] = *m;
+    ui_head = (uint16_t)((ui_head + 1) % UI_Q_SIZE);
+    ui_free--;
+  }
+  xSemaphoreGive(g_ui_mux);
+}
 
 /* TEMPORARY — do NOT commit.  Serial-Console diagnostic. */
 static uint32_t      serial_rx_bytes = 0;
@@ -558,10 +611,12 @@ static void publish_status(void) {
 }
 
 /*---------------------------------------------------------------
- * BLE → app callbacks (run on the ARDUINO core via ble_link_poll).
+ * BLE → app callbacks (run on the COMM task via ble_link_poll).
+ * Parse only — publish to the display task, never touch LVGL.
  *--------------------------------------------------------------*/
 
-/* NavData JSON (protocol.md §2) — same path as the serial mock. */
+/* NavData JSON (protocol.md §2) — COMM thread. Parses and publishes the
+   state to the display task (ui_q); no LVGL calls here. */
 static void on_ble_nav(const void *data, size_t len) {
   char buf[NAV_MAX_LEN + 1];
   if (len >= sizeof(buf)) len = sizeof(buf) - 1;
@@ -573,11 +628,13 @@ static void on_ble_nav(const void *data, size_t len) {
   if (parse_nav_message(buf, len, &st)) {
     Serial.printf("[RX] BLE frame #%u OK  t=%d %u B\n",
                   (unsigned)rx_count, (unsigned)st.msg_type, (unsigned)len);
-    on_nav_state(st);
-    publish_status();
+    struct ui_msg m;
+    m.kind = UI_MSG_NAV;
+    m.nav  = st;
+    ui_push(&m);
   } else {
     /* spec §6: parse error → frame ignored, rx_count still incremented.
-     * On-board: show length + hex dump so we can read it without a wire. */
+     * On-board: log length + hex dump so we can read it without a wire. */
     Serial.printf("[RX] BLE frame #%u PARSE ERROR (%u B)\n",
                   (unsigned)rx_count, (unsigned)len);
     char dbg[96];
@@ -586,9 +643,9 @@ static void on_ble_nav(const void *data, size_t len) {
     int p = 0;
     for (int i = 0; i < n && p < 80; i++)
       p += snprintf(dbg + p, sizeof(dbg) - p, "%02X ", b[i]);
-    toast_debug(dbg, C_BAD, 4000);
-    publish_status();
+    Serial.printf("[RX]   %s\n", dbg);
   }
+  publish_status();
 }
 
 /* MapData binary frame (protocol.md §4/§6) — decode + render.
@@ -597,189 +654,95 @@ static void on_ble_nav(const void *data, size_t len) {
 /* per-line point buffers: mutable so lv_line keeps our pointer (no malloc at 2 Hz) */
 static lv_point_precise_t map_pts[MAP_POOL][MAP_MAX_PTS];
 
-static void render_map_frame(const MapFrame *fr) {
-  /* Rotate the world so that the vehicle heading points "up" (screen -y).
-     heading unit = degrees × 10, 0° = north.  Screen: +x right, +y down. */
-  double theta = fr->heading * 0.1 * (3.14159265358979323846 / 180.0);
-  double ct = cos(theta), st = sin(theta);
-
-  bool show_vehicle = (fr->flags & MAP_FLAG_VEHICLE) != 0;
-
-  int used = 0;
-
-  /* Z-order = creation order (LVGL 9): roads FIRST, route LAST (top).
-     Roads/branches: two thin (2 px) bright edge lines offset ±width/2
-     perpendicular to the center line (frame width = total road width).
-     Route: single fat white line with rounded joins ("filled" look).  */
-
-  /* pool budget: 1 slot per route/destination, 2 per road/branch */
-  int n_route = 0;
-  for (int si = 0; si < fr->seg_count; si++)
-    if (fr->segs[si].type == MAP_SEG_ROUTE) n_route++;
-  int route_room = n_route + 2;                 /* +2: destination + margin */
-  if (route_room > MAP_POOL) route_room = MAP_POOL;
-  int road_room = (MAP_POOL - route_room) / 2;
-  if (road_room < 0) road_room = 0;
-
-  static double base[2][MAP_MAX_PTS * 2]; /* base[0] center pts, base[1] edge pts */
-  int road_i = 0;
-
-  /* ---- pass 1a: roads / branches → 2 edge lines each ---------------- */
-  for (int si = 0; si < fr->seg_count; si++) {
-    const MapSeg *sg = &fr->segs[si];
-    if (sg->type != MAP_SEG_ROAD && sg->type != MAP_SEG_BRANCH) continue;
-    if (road_i >= road_room) continue;         /* pool exhausted — skip */
-    road_i++;
-
-    int n = sg->npts;
-    for (int i = 0; i < n; i++) {
-      double x = sg->points[i * 2 + 0];
-      double y = sg->points[i * 2 + 1];
-      base[0][i * 2 + 0] =  x * ct + y * st + 240.0;
-      base[0][i * 2 + 1] = -x * st + y * ct + 240.0;
+/* Blit a PREPARED frame into the LVGL line pool (DISPLAY thread only).
+   Reads a published MapRenderFrame snapshot — no geometry math here.
+   Z-order = creation order (LVGL 9): roads first, route last (top).
+   Style per line type:
+     road/branch  → thin (2 px) bright white edge line
+     destination  → 4 px accent
+     route        → fat white, rounded ("filled" look) */
+static void render_map_display(const MapRenderFrame *rf) {
+  for (int i = 0; i < rf->line_count && i < MAP_POOL; i++) {
+    const MapRenderLine *ln = &rf->lines[i];
+    lv_obj_t *line = map_lines[i];
+    for (int p = 0; p < ln->npts; p++) {
+      map_pts[i][p].x = (lv_value_precise_t)ln->pts[p * 2 + 0];
+      map_pts[i][p].y = (lv_value_precise_t)ln->pts[p * 2 + 1];
     }
-
-    double half = sg->width * 0.5;
-    if (half < 1.5) half = 1.5;
-
-    for (int e = 0; e < 2 && used < MAP_POOL - 2 - n_route; e++) {
-      double sign = (e == 0) ? 1.0 : -1.0;
-      /* per-vertex offset along the average of neighboring normals so
-         corners don't spike */
-      for (int i = 0; i < n; i++) {
-        double x = base[0][i * 2], y = base[0][i * 2 + 1];
-        double nx = 0, ny = 0;
-        if (n > 1) {
-          if (i < n - 1) {
-            double dx = base[0][(i + 1) * 2] - x, dy = base[0][(i + 1) * 2 + 1] - y;
-            double L = sqrt(dx * dx + dy * dy);
-            if (L > 0.0001) { nx += -dy / L; ny += dx / L; }
-          }
-          if (i > 0) {
-            double dx = x - base[0][(i - 1) * 2], dy = y - base[0][(i - 1) * 2 + 1];
-            double L = sqrt(dx * dx + dy * dy);
-            if (L > 0.0001) { nx += -dy / L; ny += dx / L; }
-          }
-        }
-        double L = sqrt(nx * nx + ny * ny);
-        if (L < 0.0001) { nx = 0; ny = 1; } else { nx /= L; ny /= L; }
-        double off = half * sign;
-        base[1][i * 2 + 0] = x + nx * off;
-        base[1][i * 2 + 1] = y + ny * off;
-      }
-      lv_obj_t *line = map_lines[used];
-      for (int i = 0; i < n; i++) {
-        map_pts[used][i].x = (lv_value_precise_t)lrint(base[1][i * 2 + 0]);
-        map_pts[used][i].y = (lv_value_precise_t)lrint(base[1][i * 2 + 1]);
-      }
-      lv_line_set_points(line, map_pts[used], n);
-      lv_obj_set_size(line, 480, 480);   /* points line-local → anchor at (0,0) */
-      lv_obj_align(line, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_line_set_points(line, map_pts[i], (uint32_t)ln->npts);
+    lv_obj_set_size(line, 480, 480);   /* points line-local → anchor at (0,0) */
+    lv_obj_align(line, LV_ALIGN_TOP_LEFT, 0, 0);
+    if (ln->type == MAP_SEG_ROAD || ln->type == MAP_SEG_BRANCH) {
       lv_obj_set_style_line_width(line, 2, 0);          /* thin edge */
       lv_obj_set_style_line_color(line, C_TEXT, 0);     /* bright white */
-      lv_obj_set_style_line_rounded(line, true, 0);
-      lv_obj_remove_flag(line, LV_OBJ_FLAG_HIDDEN);
-      used++;
+    } else if (ln->type == MAP_SEG_DESTINATION) {
+      lv_obj_set_style_line_width(line, 4, 0);
+      lv_obj_set_style_line_color(line, C_ACCENT, 0);
+    } else { /* MAP_SEG_ROUTE */
+      lv_obj_set_style_line_width(line, ln->width, 0);  /* fat filled look */
+      lv_obj_set_style_line_color(line, C_TEXT, 0);     /* white          */
     }
-  }
-
-  /* ---- pass 1b: destination (accent, single line) ------------------- */
-  for (int si = 0; si < fr->seg_count && used < MAP_POOL - n_route; si++) {
-    const MapSeg *sg = &fr->segs[si];
-    if (sg->type != MAP_SEG_DESTINATION) continue;
-    lv_obj_t *line = map_lines[used];
-    for (int i = 0; i < sg->npts; i++) {
-      double x = sg->points[i * 2 + 0];
-      double y = sg->points[i * 2 + 1];
-      map_pts[used][i].x = (lv_value_precise_t)lrint( x * ct + y * st + 240.0);
-      map_pts[used][i].y = (lv_value_precise_t)lrint(-x * st + y * ct + 240.0);
-    }
-    lv_line_set_points(line, map_pts[used], sg->npts);
-    lv_obj_set_size(line, 480, 480);
-    lv_obj_align(line, LV_ALIGN_TOP_LEFT, 0, 0);
-    lv_obj_set_style_line_width(line, 4, 0);
-    lv_obj_set_style_line_color(line, C_ACCENT, 0);
     lv_obj_set_style_line_rounded(line, true, 0);
     lv_obj_remove_flag(line, LV_OBJ_FLAG_HIDDEN);
-    used++;
   }
-
-  /* ---- pass 2: route (topmost, fat white, rounded) ------------------ */
-  for (int si = 0; si < fr->seg_count && used < MAP_POOL; si++) {
-    const MapSeg *sg = &fr->segs[si];
-    if (sg->type != MAP_SEG_ROUTE) continue;
-    lv_obj_t *line = map_lines[used];
-    for (int i = 0; i < sg->npts; i++) {
-      double x = sg->points[i * 2 + 0];
-      double y = sg->points[i * 2 + 1];
-      map_pts[used][i].x = (lv_value_precise_t)lrint( x * ct + y * st + 240.0);
-      map_pts[used][i].y = (lv_value_precise_t)lrint(-x * st + y * ct + 240.0);
-    }
-    lv_line_set_points(line, map_pts[used], sg->npts);
-    lv_obj_set_size(line, 480, 480);
-    lv_obj_align(line, LV_ALIGN_TOP_LEFT, 0, 0);
-    lv_obj_set_style_line_width(line, sg->width, 0);   /* fat filled look */
-    lv_obj_set_style_line_color(line, C_TEXT, 0);      /* white          */
-    lv_obj_set_style_line_rounded(line, true, 0);
-    lv_obj_remove_flag(line, LV_OBJ_FLAG_HIDDEN);
-    used++;
-  }
-  for (int i = used; i < MAP_POOL; i++)
+  for (int i = rf->line_count; i < MAP_POOL; i++)
     lv_obj_add_flag(map_lines[i], LV_OBJ_FLAG_HIDDEN);
 
-  /* ---- destination dot marker (end point of destination segment) --- */
+  /* ---- destination dot marker (screen coords, pre-rotated) -------- */
   if (map_marker) {
-    lv_obj_add_flag(map_marker, LV_OBJ_FLAG_HIDDEN);
-    for (int si = 0; si < fr->seg_count; si++) {
-      if (fr->segs[si].type != MAP_SEG_DESTINATION) continue;
-      int last = fr->segs[si].npts - 1;
-      double x = fr->segs[si].points[last * 2 + 0];
-      double y = fr->segs[si].points[last * 2 + 1];
-      double rx =  x * ct + y * st;
-      double ry = -x * st + y * ct;
-      lv_coord_t ex = (lv_coord_t)lrint(rx + 240.0);
-      lv_coord_t ey = (lv_coord_t)lrint(ry + 240.0);
+    if (rf->marker_visible) {
       lv_obj_remove_flag(map_marker, LV_OBJ_FLAG_HIDDEN);
-      lv_obj_set_pos(map_marker, ex - 12, ey - 12);
-      break;
+      lv_obj_set_pos(map_marker, rf->marker_x - 12, rf->marker_y - 12);
+    } else {
+      lv_obj_add_flag(map_marker, LV_OBJ_FLAG_HIDDEN);
     }
   }
 
-  /* ---- vehicle marker --------------------------------------------- */
+  /* ---- vehicle marker (fixed at screen centre; world pre-rotated) -- */
   if (map_vehicle) {
-    if (!show_vehicle) {
-      lv_obj_add_flag(map_vehicle, LV_OBJ_FLAG_HIDDEN);
-    } else {
-      lv_obj_remove_flag(map_vehicle, LV_OBJ_FLAG_HIDDEN);
-      /* The world is already rotated onto the screen; the vehicle
-         marker sits at screen centre and stays as-is. */
-    }
+    if (!rf->show_vehicle) lv_obj_add_flag(map_vehicle, LV_OBJ_FLAG_HIDDEN);
+    else                   lv_obj_remove_flag(map_vehicle, LV_OBJ_FLAG_HIDDEN);
   }
 
   /* ---- scale bar + caption ---------------------------------------- */
-  bool show_scale = (fr->flags & MAP_FLAG_SCALE_BAR) != 0 && fr->scale > 0;
-  if (show_scale) {
-    lv_obj_remove_flag(map_scale, LV_OBJ_FLAG_HIDDEN);
-    int meters = (int)((100 * 100) / fr->scale);
-    if (meters < 1) meters = 1;
-  } else {
-    lv_obj_add_flag(map_scale, LV_OBJ_FLAG_HIDDEN);
+  if (map_scale) {
+    if (rf->show_scale) lv_obj_remove_flag(map_scale, LV_OBJ_FLAG_HIDDEN);
+    else                lv_obj_add_flag(map_scale, LV_OBJ_FLAG_HIDDEN);
   }
-
   if (map_label) {
     char txt[64];
-    int heading_deg = (int)(fr->heading / 10);
-    if (show_scale) {
-      int meters = (int)((100 * 100) / fr->scale);
-      snprintf(txt, sizeof txt, "%d°   |   %d m", heading_deg, meters);
-    } else {
-      snprintf(txt, sizeof txt, "%d°   |   %u Seg.", heading_deg, (unsigned)fr->seg_count);
-    }
+    int heading_deg = rf->heading / 10;
+    if (rf->show_scale)
+      snprintf(txt, sizeof txt, "%d°   |   %d m", heading_deg, rf->scale_meters);
+    else
+      snprintf(txt, sizeof txt, "%d°   |   %u Seg.", heading_deg, (unsigned)rf->seg_count);
     lv_label_set_text(map_label, txt);
     lv_obj_remove_flag(map_label, LV_OBJ_FLAG_HIDDEN);
   }
 }
 
+/* Display thread: if a new prepared frame is published AND the map
+   screen is active, blit it. The blit is short (pool updates only —
+   the actual flush happens later in lv_timer_handler), so holding
+   g_map_mux across it only delays the comm task's next publish by a
+   few ms. */
+static bool map_blit_if_new(void) {
+  if (!g_map_ready || active_screen != map_screen) return false;
+  if (g_map_mux == NULL) return false;
+  xSemaphoreTake(g_map_mux, portMAX_DELAY);
+  if (!g_map_ready) {
+    xSemaphoreGive(g_map_mux);
+    return false;
+  }
+  g_map_ready = false;
+  render_map_display(&g_map_out);
+  xSemaphoreGive(g_map_mux);
+  return true;
+}
+
+/* MapData binary frame (protocol.md §4/§6) — COMM thread.
+   Parse + geometry (prepare_map_frame), then publish the prepared frame
+   to the display task. No LVGL calls here. */
 static void on_ble_map_frame(const void *data, size_t len) {
   const uint8_t *f = (const uint8_t *)data;
 
@@ -790,9 +753,14 @@ static void on_ble_map_frame(const void *data, size_t len) {
     return;
   }
 
-  /* decode first (bounds-checks all bytes, returns false on any error) */
-  static MapFrame fr;   /* ~7 KB — lives in .bss, off the app-task stack */
+  /* decode first (bounds-checks all bytes, returns false on any error).
+     g_map_parse_mux: the serial mock (display task) can call this handler
+     concurrently with a real BLE frame (comm task) — both share the
+     static fr below. */
+  static MapFrame fr;   /* ~7 KB — lives in .bss, off the comm-task stack */
+  xSemaphoreTake(g_map_parse_mux, portMAX_DELAY);
   if (!parse_map_frame(f, len, &fr)) {
+    xSemaphoreGive(g_map_parse_mux);
     map_drop_count++;
     Serial.printf("[MAP] drop: parse error (%u B)\n", (unsigned)len);
     publish_status();
@@ -815,13 +783,20 @@ static void on_ble_map_frame(const void *data, size_t len) {
   Serial.printf("[MAP] frame seq=%u accepted (%u B, %u segs, heading %d)\n",
                 fr.seq, (unsigned)len, (unsigned)fr.seg_count, (int)fr.heading);
 
-  /* render — only when the map screen is up (frames can arrive any time) */
-  if (active_screen == map_screen) render_map_frame(&fr);
+  /* geometry → publish. The display task blits it on its next loop
+     iteration (map_blit_if_new) when the map screen is active. */
+  xSemaphoreTake(g_map_mux, portMAX_DELAY);
+  prepare_map_frame(&fr, &g_map_out);
+  g_map_ready = true;
+  xSemaphoreGive(g_map_mux);
+  xSemaphoreGive(g_map_parse_mux);
 
   publish_status();
 }
 
-/* Control JSON (protocol.md §5) */
+/* Control JSON (protocol.md §5) — COMM thread. reset_map is pure comm
+   state (handled here); brightness / force_idle are UI effects and get
+   published to the display task. */
 static void on_ble_ctrl(const void *data, size_t len) {
   char buf[CTRL_MAX_LEN + 1];
   if (len >= sizeof(buf)) len = sizeof(buf) - 1;
@@ -834,24 +809,67 @@ static void on_ble_ctrl(const void *data, size_t len) {
     publish_status();
     return;
   }
-  if (cs.brightness_set) {
-    apply_brightness(cs.brightness_pct);   /* also persisted (spec §5) */
-    Serial.printf("[CTL] brightness %d%%\n", cs.brightness_pct);
-  }
-  if (cs.force_idle) {
-    app = APP_IDLE;
-    state_until_ms = 0;
-    goto_screen(home_screen, "home (ctrl)");
-    Serial.println("[CTL] state → idle");
-  }
   if (cs.reset_map) {
     map_seq_last = 0;
     map_seq_seen = false;
     map_drop_count = 0;
     Serial.println("[CTL] map buffer reset (seq → 0)");
   }
+  if (cs.brightness_set || cs.force_idle) {
+    struct ui_msg m;
+    m.kind  = UI_MSG_CTRL;
+    m.ctrl  = cs;
+    ui_push(&m);
+  }
   publish_status();
 }
+
+/*---------------------------------------------------------------
+ * Display-task side of the hand-off.
+ *--------------------------------------------------------------*/
+
+/* Apply a Control message (DISPLAY thread). brightness → LEDC + NVS,
+   force_idle → state machine + screen. */
+static void apply_ctrl(const CtrlState *cs) {
+  if (cs->brightness_set) {
+    apply_brightness(cs->brightness_pct);   /* also persisted (spec §5) */
+    Serial.printf("[CTL] brightness %d%%\n", cs->brightness_pct);
+  }
+  if (cs->force_idle) {
+    app = APP_IDLE;
+    state_until_ms = 0;
+    goto_screen(home_screen, "home (ctrl)");
+    Serial.println("[CTL] state → idle");
+  }
+}
+
+/* Drain the ui_q ring (DISPLAY thread). Nav → state machine + UI,
+   Ctrl → apply_ctrl. Runs every loop iteration, so the ring (16 slots)
+   never fills under normal 1–2 Hz traffic. */
+static void drain_ui_queue(void) {
+  if (g_ui_mux == NULL) return;
+  for (;;) {
+    struct ui_msg m;
+    xSemaphoreTake(g_ui_mux, portMAX_DELAY);
+    if (ui_tail == ui_head) {
+      xSemaphoreGive(g_ui_mux);
+      break;
+    }
+    m = ui_q[ui_tail];
+    ui_tail = (uint16_t)((ui_tail + 1) % UI_Q_SIZE);
+    ui_free++;
+    xSemaphoreGive(g_ui_mux);
+
+    if (m.kind == UI_MSG_NAV) {
+      on_nav_state(m.nav);
+      publish_status();
+    } else if (m.kind == UI_MSG_CTRL) {
+      apply_ctrl(&m.ctrl);
+      publish_status();
+    }
+  }
+}
+
 
 /*---------------------------------------------------------------
  * BLE status dot: reflects the radio link AND the app state.
@@ -1186,6 +1204,29 @@ static void handle_gesture_state(void) {
 }
 
 /*---------------------------------------------------------------
+ * COMM task — BLE + parse + geometry (NO LVGL).
+ *
+ * Runs the same work the main loop used to do for the radio:
+ * drain the BLE queues (ble_link_poll), parse NavData/MapData/
+ * Control and run the map geometry stage. Results are published
+ * to the display task via g_map_out + ui_q (see hand-off block).
+ *
+ * Stack: the parsers keep their big buffers in .bss (static), so
+ * 4 KB is comfortable headroom on top of the FreeRTOS overhead.
+ * Priority: 1 = same as the display task (Arduino core). Time-sliced,
+ * so a geometry burst shares the CPU with the screen instead of
+ * preempting it — the display never gets starved by an incoming
+ * map frame. The comm task also yields on every queue wait.
+ *--------------------------------------------------------------*/
+static void comm_task(void *arg) {
+  (void)arg;
+  for (;;) {
+    ble_link_poll();   /* drain NavData/Control/MapData, adv state */
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+}
+
+/*---------------------------------------------------------------
  * System initialization
  *--------------------------------------------------------------*/
 
@@ -1275,9 +1316,21 @@ void setup() {
   create_map_screen();
   create_info_screen();
 
+  /* ---- threading hand-off (comm task → display task) -------------
+   * Mutexes must exist before the comm task starts publishing. */
+  g_map_mux = xSemaphoreCreateMutex();
+  g_ui_mux  = xSemaphoreCreateMutex();
+  g_map_parse_mux = xSemaphoreCreateMutex();
+  ui_free   = UI_Q_SIZE;
+  if (!g_map_mux || !g_ui_mux || !g_map_parse_mux) {
+    Serial.println("[FATAL] hand-off mutex creation failed");
+    while (true) delay(1000);
+  }
+
   /* ---- BLE GATT server (protocol.md §1) ----
    * Server runs in its own FreeRTOS task; callbacks only push into
-   * mutex-protected queues that ble_link_poll() drains on the app core. */
+   * mutex-protected queues that ble_link_poll() drains — now on the
+   * COMM task, which parses + prepares and publishes to the display. */
   {
     ble_link_cb ble_cb;
     memset(&ble_cb, 0, sizeof ble_cb);
@@ -1290,6 +1343,10 @@ void setup() {
     Serial.printf("[BLE] adv=%s name=%s\n", "on", BLE_NAME);
   }
 
+  /* ---- COMM task (BLE + parse + geometry) ------------------------ */
+  xTaskCreate(comm_task, "comm", 4096, NULL, 1, NULL);
+  Serial.println("[TASK] comm task started (BLE + parse + geometry)");
+
   ble_timer = lv_timer_create(ble_blink_cb, 500, NULL);
 
   goto_screen(home_screen, "home");
@@ -1298,8 +1355,11 @@ void setup() {
 }
 
 void loop() {
-  handle_serial();
-  ble_link_poll();          /* drain NavData/Control/MapData queues, adv state */
+  /* DISPLAY task: everything LVGL lives here. The comm task
+     (BLE + parse + geometry) publishes into g_map_out / ui_q. */
+  handle_serial();          /* debug channel (serial stays on display) */
+  drain_ui_queue();         /* apply parsed Nav/Ctrl from the comm task */
+  map_blit_if_new();        /* blit the latest prepared map frame */
   handle_gesture_state();
   handle_state_timeouts();
   /* TEMPORARY — do NOT commit.  Update serial status label every 500 ms. */
