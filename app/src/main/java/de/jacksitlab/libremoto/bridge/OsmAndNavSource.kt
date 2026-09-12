@@ -143,7 +143,13 @@ class OsmAndNavSource(
         for (pkg in listOf("net.osmand.plus", "net.osmand", "net.osmand.dev")) {
             if (isInstalled(pkg)) { intent.`package` = pkg; break }
         }
-        val ok = try { context.bindService(intent, connection, Context.BIND_AUTO_CREATE) }
+        var flags = Context.BIND_AUTO_CREATE
+        // API 34+: allow the bound service to start activities (matches the
+        // official osmand-api-demo; needed once OsmAnd raises importance).
+        if (android.os.Build.VERSION.SDK_INT >= 34) {
+            flags = flags or Context.BIND_ALLOW_ACTIVITY_STARTS
+        }
+        val ok = try { context.bindService(intent, connection, flags) }
                  catch (e: Exception) { log("osmAnd: bind fehlgeschlagen: $e"); false }
         if (ok) {
             bound = true
