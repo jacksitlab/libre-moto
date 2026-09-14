@@ -47,6 +47,7 @@ class OsmAndNavSource(
     @Volatile private var bound = false
     @Volatile private var callbackId = -1L
     private var svc: IOsmAndAidlInterface? = null
+    private val main = android.os.Handler(android.os.Looper.getMainLooper())
 
     @Volatile private var navActive = false
     @Volatile private var distanceToM: Int = 0
@@ -154,10 +155,8 @@ class OsmAndNavSource(
         if (ok) {
             bound = true
             log("osmAnd: Bind angefragt …")
-            // register for navigation updates once connected (retry a few times)
-            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                tryRegisterNav()
-            }, 1500)
+            // register for navigation updates once connected (retry until success)
+            main.postDelayed({ tryRegisterNav() }, 1500)
         } else {
             log("osmAnd: nicht gefunden (Installation prüfen)")
         }
@@ -165,14 +164,40 @@ class OsmAndNavSource(
 
     @SuppressLint("MissingPermission")
     private fun tryRegisterNav() {
-        val s = svc ?: run { log("osmAnd: svc null — Navigation nicht verfügbar"); return }
+        if (!bound) return
+        val s = svc ?: run {
+            // Service not connected yet — OsmAnd may still be initialising. Retry.
+            log("osmAnd: Service noch nicht verbunden — versuche erneut …")
+            main.postDelayed({ tryRegisterNav() }, 2000)
+            return
+        }
         try {
             val p = ANavigationUpdateParams()
             p.setSubscribeToUpdates(true)
-            callbackId = s.registerForNavigationUpdates(p, callback)
-            log("osmAnd: Nav-Updates registriert (id=$callbackId)")
+            val id = s.registerForNavigationUpdates(p, callback)
+            // OsmAnd's callback ids start at 0 (AtomicLong(0) + getAndIncrement),
+            // so 0 is a SUCCESS. Only -1 (app not enabled / unsubscribe) or a
+            // negative UNKNOWN_API_ERROR means failure.
+            if (id >= 0) {
+                callbackId = id
+                log("osmAnd: Nav-Updates registriert (id=$id)")
+            } else {
+                // id == -1 → OsmAnd has not enabled THIS app for its AIDL API yet.
+                // OsmAnd registers each external app as a "connected app" that is
+                // DISABLED by default; the user must enable it once:
+                //   OsmAnd → Menü → Plugins → "LibreMoto" (einmal antippen).
+                // Keep retrying so the stream starts as soon as it is enabled —
+                // no need to re-toggle the source in this app.
+                // Log our package name so it can be compared with the entry shown
+                // in OsmAnd's Plugins screen (a mismatch would explain the -1).
+                log("osmAnd: id=-1 → App in OsmAnd noch nicht freigeschaltet. " +
+                    "Unser Package: ${context.packageName}. " +
+                    "OsmAnd: Menü → Plugins → \"LibreMoto\" antippen. (wiederhole …)")
+                main.postDelayed({ tryRegisterNav() }, 5000)
+            }
         } catch (e: RemoteException) {
             log("osmAnd: registerForNavigationUpdates fehlgeschlagen: $e")
+            main.postDelayed({ tryRegisterNav() }, 5000)
         }
     }
 
@@ -183,7 +208,7 @@ class OsmAndNavSource(
     @SuppressLint("MissingPermission")
     override fun stop() {
         try {
-            if (callbackId > 0) {
+            if (callbackId >= 0) {
                 val p = ANavigationUpdateParams()
                 p.setCallbackId(callbackId)
                 p.setSubscribeToUpdates(false)

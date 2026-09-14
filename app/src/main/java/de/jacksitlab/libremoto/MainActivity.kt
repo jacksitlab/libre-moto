@@ -167,12 +167,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ---- log -------------------------------------------------------
+    // log() is called from several threads (OsmAnd AIDL callbacks arrive on a
+    // binder thread, BLE callbacks, the stream timer). TextViews may only be
+    // touched from the main thread, so marshal every write through `main`.
+    // Every line is also mirrored to logcat (tag "LibreMoto") for `adb logcat`.
     private fun log(line: String) {
-        val t = (System.currentTimeMillis() % 86_400_000) / 1000
-        val stamp = "${t / 3600}:${(t / 60) % 60}:${(t % 60)}"
-        val next = logView.text.toString() + "$stamp  $line\n"
-        val lines = next.split('\n')
-        logView.setText(if (lines.size > 60) lines.takeLast(60).joinToString("\n") else next)
+        try { android.util.Log.d("LibreMoto", line) } catch (_: Throwable) {}
+        main.post {
+            if (!::logView.isInitialized) return@post
+            val t = (System.currentTimeMillis() % 86_400_000) / 1000
+            val stamp = "${t / 3600}:${(t / 60) % 60}:${(t % 60)}"
+            val next = logView.text.toString() + "$stamp  $line\n"
+            val lines = next.split('\n')
+            logView.setText(if (lines.size > 60) lines.takeLast(60).joinToString("\n") else next)
+        }
     }
 
     override fun onDestroy() {

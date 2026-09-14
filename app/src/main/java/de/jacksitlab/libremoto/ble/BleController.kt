@@ -34,7 +34,9 @@ object Uuid {
 fun interface BleLog { fun log(line: String) }
 
 class BleController(private val context: Context, log: (String) -> Unit) {
-    /** Log line sink (UI-free, test-friendly). */
+    /** Log line sink (UI-free, test-friendly). In the app this sink is wired to
+     *  MainActivity.log, which mirrors every line to logcat (tag "LibreMoto"),
+     *  so `adb logcat -s LibreMoto` shows the full BLE traffic (payloads included). */
     private val log: (String) -> Unit = log
     private val gatt = java.util.concurrent.atomic.AtomicReference<android.bluetooth.BluetoothGatt>()
     @Volatile var connected = false; private set
@@ -203,12 +205,14 @@ class BleController(private val context: Context, log: (String) -> Unit) {
     @SuppressLint("MissingPermission")
     fun sendNavData(json: String) {
         val c = chNav ?: run { log("nav: Channel fehlt"); return }
+        log("TX nav  (${json.length}B): $json")
         writeChar(c, json.toByteArray(Charsets.UTF_8), "nav")
     }
 
     @SuppressLint("MissingPermission")
     fun sendControl(json: String) {
         val c = chCtl ?: run { log("ctl: Channel fehlt"); return }
+        log("TX ctl  (${json.length}B): $json")
         writeChar(c, json.toByteArray(Charsets.UTF_8), "ctl")
     }
 
@@ -221,6 +225,7 @@ class BleController(private val context: Context, log: (String) -> Unit) {
         val n = (frame.size + chunk - 1) / chunk
         var idx = 0
         val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        log("TX map  (${frame.size}B, $n Chunks): ${hex(frame)}")
         fun pump() {
             if (idx >= n) { log("map: fertig ${frame.size}B in $n Chunks"); return }
             val off = idx * chunk
@@ -261,3 +266,6 @@ object HexUtil {
         return b.joinToString(" ") { "%02X".format(it) }
     }
 }
+
+/** Compact uppercase hex for binary payloads (MapFrame) in the logcat TX line. */
+private fun hex(b: ByteArray): String = b.joinToString("") { "%02X".format(it) }
