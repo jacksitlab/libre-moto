@@ -17,11 +17,11 @@ set -euo pipefail
 # Usage:
 #   ./build-osmand-fork.sh [output-dir]
 #
-# Environment (optional, Defaults passen zu /opt/data):
-#   OSMAND_WORK   — Arbeitsverzeichnis  (default: /opt/data/osmand-build)
-#   JAVA_HOME     — JDK 17 Pfad          (default: /opt/data/.tools/jdk17)
-#   ANDROID_HOME  — Android SDK Pfad    (default: /opt/data/.tools/android-sdk)
-#   ANDROID_NDK   — Android NDK 23 Pfad (default: /opt/data/.tools/android-ndk-23)
+# Environment (optional):
+#   OSMAND_WORK   — Arbeitsverzeichnis  (default: ./osmand-build)
+#   JAVA_HOME     — JDK 17 Pfad
+#   ANDROID_HOME  — Android SDK Pfad
+#   ANDROID_NDK   — Android NDK 23 Pfad
 # ============================================================================
 
 DIRBIN="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
@@ -38,18 +38,18 @@ PR_BRANCH="feature/osmand-route-polyline-export"
 PR_USER="peresmishnyk"
 PR_REPO="https://github.com/${PR_USER}/OsmAnd.git"
 
-# OsmAnd-Hauptrepo (Kann ein eigener Fork sein)
 OSMAND_REPO="${OSMAND_REPO:-https://github.com/osmandapp/OsmAnd.git}"
-OSMAND_BRANCH="${OSMAND_BRANCH:-master}"
-
-# Externe Repos
 CORE_LEGACY_REPO="https://github.com/osmandapp/OsmAnd-core-legacy.git"
 RESOURCES_REPO="https://github.com/osmandapp/OsmAnd-resources.git"
 BUILD_REPO="https://github.com/osmandapp/OsmAnd-build.git"
 
 # Build-Konfiguration: androidFull (net.osmand.plus = OsmAnd~), legacy core, arm64
 FLAVOR="androidFullLegacyArm64Debug"
-APK_PATTERN="OsmAnd-androidFull-legacy-arm64-debug.apk"
+
+# versionCode hoch genug für Upgrade über F-Droid 5.3.10 (versionCode 531003)
+# F-Droid 5.4.4 hat 540403. Wir setzen 599999 — höher als alle F-Droid-Builds.
+OSMAND_VERSION_CODE="${OSMAND_VERSION_CODE:-599999}"
+OSMAND_VERSION_NAME="${OSMAND_VERSION_NAME:-5.5.0-libremoto}"
 
 log()  { echo -e "\033[1;34m[build-osmand]\033[0m $*"; }
 err()  { echo -e "\033[1;31m[ERROR]\033[0m $*" >&2; exit 1; }
@@ -83,9 +83,10 @@ cd "$WORK"
 
 # Verzeichnisstruktur (wie OsmAnd es erwartet):
 #   $WORK/
-#     OsmAnd/          — Hauptrepo (git clone)
-#     core-legacy/     — Native core (neben OsmAnd/)
-#     resources/       — Fonts, Voice, POI etc. (neben OsmAnd/)
+#     OsmAnd/          — Hauptrepo
+#     core-legacy/     — Native core
+#     resources/       — Fonts, Voice, POI etc.
+#     build/           — Build-Scripts (functions.sh für externals)
 
 clone_or_update() {
     local url="$1" dir="$2" branch="${3:-master}"
@@ -100,13 +101,13 @@ clone_or_update() {
     fi
 }
 
-clone_or_update "$OSMAND_REPO"  "OsmAnd"        "$OSMAND_BRANCH"
+clone_or_update "$OSMAND_REPO"      "OsmAnd"      "master"
 clone_or_update "$CORE_LEGACY_REPO" "core-legacy" "master"
 clone_or_update "$RESOURCES_REPO"   "resources"   "master"
-clone_or_update "$BUILD_REPO"        "build"        "master"
+clone_or_update "$BUILD_REPO"       "build"        "master"
 
-# NDK-Binär ausführbar machen (entpackt ohne +x)
-[[ -x "$ANDROID_NDK/ndk-build" ]] || chmod +x "$ANDROID_NDK/ndk-build"
+# NDK-Binär ausführbar machen (falls entpackt ohne +x)
+[[ -x "$ANDROID_NDK/ndk-build" ]] || chmod +x "$ANDROID_NDK/ndk-build" 2>/dev/null || true
 
 # Git-Identity für cherry-pick setzen (nur lokal im OsmAnd-Repo)
 git -C "$WORK/OsmAnd" config user.email  "libre-moto@jacksitlab.de" 2>/dev/null || true
@@ -132,7 +133,8 @@ else
     PR_COMMIT=$(git log --format='%H' "pr25378/${PR_BRANCH}" -1)
     log "Cherry-pick commit $PR_COMMIT …"
 
-    if ! git cherry-pick "$PR_COMMIT" --no-commit; then
+    # Auf master cherry-picked der PR sauber (keine Konflikte).
+    if ! git cherry-pick --no-commit "$PR_COMMIT"; then
         err "Cherry-pick fehlgeschlagen — Konflikte. Bitte manuell auflösen:\n  cd $WORK/OsmAnd && git cherry-pick --abort && git cherry-pick $PR_COMMIT"
     fi
     git commit -m "AIDL: active route geometry and route lifecycle callbacks (PR #25378)
@@ -141,6 +143,20 @@ Cherry-picked from peresmishnyk/OsmAnd feature/osmand-route-polyline-export
 Adds getActiveRouteGeometry() + registerForRouteUpdates() to AIDL V2."
     ok "PR #25378 angewendet"
 fi
+
+# ---------------------------------------------------------------------------
+# 3b. versionCode + versionName setzen (für Upgrade über F-Droid)
+# ---------------------------------------------------------------------------
+log "Setze versionCode=$OSMAND_VERSION_CODE, versionName=$OSMAND_VERSION_NAME …"
+BUILD_GRADLE="OsmAnd/build.gradle"
+python3 -c "
+with open('$BUILD_GRADLE') as f: c = f.read()
+import re
+c = re.sub(r'versionCode\s+\d+', 'versionCode $OSMAND_VERSION_CODE', c, count=1)
+c = re.sub(r'versionName\s+\"[^\"]*\"', 'versionName \"$OSMAND_VERSION_NAME\"', c, count=1)
+with open('$BUILD_GRADLE', 'w') as f: f.write(c)
+print('  versionCode=$OSMAND_VERSION_CODE versionName=$OSMAND_VERSION_NAME')
+"
 
 # ---------------------------------------------------------------------------
 # 4. Environment setzen + Build
@@ -213,5 +229,5 @@ fi
 log "Kopiere APK nach $OUT/ …"
 cp "$APK" "$OUT/osmand-fork-arm64-debug.apk"
 ok "Fertig: $OUT/osmand-fork-arm64-debug.apk"
-log "Paket: net.osmand.plus (OsmAnd~ mit Route-Geometry-AIDL)"
+log "Paket: net.osmand.plus (OsmAnd~ $OSMAND_VERSION_NAME mit Route-Geometry-AIDL)"
 log "Installieren: adb install -r $OUT/osmand-fork-arm64-debug.apk"
