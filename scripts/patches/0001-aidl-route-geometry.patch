@@ -1,0 +1,828 @@
+From 989e587a689170718c8d158e756e7c94892a0c87 Mon Sep 17 00:00:00 2001
+From: Michkire Dmytro <michkire@gmail.com>
+Date: Sun, 5 Jul 2026 23:22:26 +0300
+Subject: [PATCH] feat(aidl): expose active route geometry and route lifecycle
+ callbacks
+
+Add getActiveRouteGeometry (pull) and registerForRouteUpdates (push) so
+external apps can read the WGS84 polyline and react to RECALCULATED,
+CANCELLED, and FINISHED events without extending navigation updates.
+
+Related to osmandapp/OsmAnd#19594
+---
+ .../osmand/aidlapi/IOsmAndAidlCallback.aidl   |   7 +
+ .../osmand/aidlapi/IOsmAndAidlInterface.aidl  |  26 ++++
+ .../aidlapi/navigation/ARouteUpdate.aidl      |   4 +
+ .../aidlapi/navigation/ARouteUpdate.java      | 129 ++++++++++++++++
+ .../navigation/ARouteUpdateParams.aidl        |   4 +
+ .../navigation/ARouteUpdateParams.java        |  59 ++++++++
+ .../navigation/ActiveRouteGeometry.aidl       |   4 +
+ .../navigation/ActiveRouteGeometry.java       | 141 ++++++++++++++++++
+ .../navigation/GetActiveRouteParams.aidl      |   4 +
+ .../navigation/GetActiveRouteParams.java      |  52 +++++++
+ .../osmand/aidl/AidlCallbackListenerV2.java   |   4 +-
+ OsmAnd/src/net/osmand/aidl/OsmandAidlApi.java | 138 +++++++++++++++++
+ .../net/osmand/aidl/OsmandAidlServiceV2.java  |  54 +++++++
+ 13 files changed, 625 insertions(+), 1 deletion(-)
+ create mode 100644 OsmAnd-api/src/net/osmand/aidlapi/navigation/ARouteUpdate.aidl
+ create mode 100644 OsmAnd-api/src/net/osmand/aidlapi/navigation/ARouteUpdate.java
+ create mode 100644 OsmAnd-api/src/net/osmand/aidlapi/navigation/ARouteUpdateParams.aidl
+ create mode 100644 OsmAnd-api/src/net/osmand/aidlapi/navigation/ARouteUpdateParams.java
+ create mode 100644 OsmAnd-api/src/net/osmand/aidlapi/navigation/ActiveRouteGeometry.aidl
+ create mode 100644 OsmAnd-api/src/net/osmand/aidlapi/navigation/ActiveRouteGeometry.java
+ create mode 100644 OsmAnd-api/src/net/osmand/aidlapi/navigation/GetActiveRouteParams.aidl
+ create mode 100644 OsmAnd-api/src/net/osmand/aidlapi/navigation/GetActiveRouteParams.java
+
+diff --git a/OsmAnd-api/src/net/osmand/aidlapi/IOsmAndAidlCallback.aidl b/OsmAnd-api/src/net/osmand/aidlapi/IOsmAndAidlCallback.aidl
+index 477eda136b..853b0fd94e 100644
+--- a/OsmAnd-api/src/net/osmand/aidlapi/IOsmAndAidlCallback.aidl
++++ b/OsmAnd-api/src/net/osmand/aidlapi/IOsmAndAidlCallback.aidl
+@@ -3,6 +3,7 @@ package net.osmand.aidlapi;
+ import net.osmand.aidlapi.search.SearchResult;
+ import net.osmand.aidlapi.gpx.AGpxBitmap;
+ import net.osmand.aidlapi.navigation.ADirectionInfo;
++import net.osmand.aidlapi.navigation.ARouteUpdate;
+ import net.osmand.aidlapi.navigation.OnVoiceNavigationParams;
+ import net.osmand.aidlapi.logcat.OnLogcatMessageParams;
+ 
+@@ -62,4 +63,10 @@ interface IOsmAndAidlCallback {
+      *  Callback for {@link IOsmAndAidlInterface} registerForLogcatMessages() method.
+      */
+     void onLogcatMessage(in OnLogcatMessageParams params);
++
++    /**
++     * Callback for {@link IOsmAndAidlInterface} registerForRouteUpdates() method.
++     * Polyline is not included; call getActiveRouteGeometry() on recalculation.
++     */
++    void onRouteUpdate(in ARouteUpdate update);
+ }
+\ No newline at end of file
+diff --git a/OsmAnd-api/src/net/osmand/aidlapi/IOsmAndAidlInterface.aidl b/OsmAnd-api/src/net/osmand/aidlapi/IOsmAndAidlInterface.aidl
+index 5d19662f9d..8da4a14712 100644
+--- a/OsmAnd-api/src/net/osmand/aidlapi/IOsmAndAidlInterface.aidl
++++ b/OsmAnd-api/src/net/osmand/aidlapi/IOsmAndAidlInterface.aidl
+@@ -98,7 +98,10 @@ import net.osmand.aidlapi.copyfile.CopyFileParams;
+ 
+ import net.osmand.aidlapi.navigation.ANavigationUpdateParams;
+ import net.osmand.aidlapi.navigation.ANavigationVoiceRouterMessageParams;
++import net.osmand.aidlapi.navigation.ActiveRouteGeometry;
++import net.osmand.aidlapi.navigation.ARouteUpdateParams;
+ import net.osmand.aidlapi.navigation.ABlockedRoad;
++import net.osmand.aidlapi.navigation.GetActiveRouteParams;
+ import net.osmand.aidlapi.navigation.AddBlockedRoadParams;
+ import net.osmand.aidlapi.navigation.RemoveBlockedRoadParams;
+ 
+@@ -956,4 +959,27 @@ interface IOsmAndAidlInterface {
+      * set RemoveWidgetGroupParams.removeWidgets = true to also remove the widgets.
+      */
+     boolean removeWidgetGroup(in RemoveWidgetGroupParams params);
++
++    /**
++     * Returns WGS84 polyline of the active route (planning or navigation).
++     *
++     * @param params optional flags (e.g. include passed segment)
++     * @param result filled on success
++     * @return false if no route, route is being calculated, or fewer than 2 points
++     */
++    boolean getActiveRouteGeometry(in GetActiveRouteParams params, out ActiveRouteGeometry result);
++
++    /**
++     * Route lifecycle updates: recalculated, cancelled, or finished.
++     * Not turn-by-turn ticks (see registerForNavigationUpdates).
++     * On recalculation, call getActiveRouteGeometry() for the polyline.
++     */
++    long registerForRouteUpdates(in ARouteUpdateParams params, IOsmAndAidlCallback callback);
++
++    /**
++     * Unregister from route lifecycle updates.
++     *
++     * @param callbackId id returned by registerForRouteUpdates
++     */
++    boolean unregisterFromRouteUpdates(in long callbackId);
+ }
+\ No newline at end of file
+diff --git a/OsmAnd-api/src/net/osmand/aidlapi/navigation/ARouteUpdate.aidl b/OsmAnd-api/src/net/osmand/aidlapi/navigation/ARouteUpdate.aidl
+new file mode 100644
+index 0000000000..08ac85cfd2
+--- /dev/null
++++ b/OsmAnd-api/src/net/osmand/aidlapi/navigation/ARouteUpdate.aidl
+@@ -0,0 +1,4 @@
++
++package net.osmand.aidlapi.navigation;
++
++parcelable ARouteUpdate;
+diff --git a/OsmAnd-api/src/net/osmand/aidlapi/navigation/ARouteUpdate.java b/OsmAnd-api/src/net/osmand/aidlapi/navigation/ARouteUpdate.java
+new file mode 100644
+index 0000000000..49da88ff5c
+--- /dev/null
++++ b/OsmAnd-api/src/net/osmand/aidlapi/navigation/ARouteUpdate.java
+@@ -0,0 +1,129 @@
++package net.osmand.aidlapi.navigation;
++
++import android.os.Bundle;
++import android.os.Parcel;
++
++import net.osmand.aidlapi.AidlParams;
++
++public class ARouteUpdate extends AidlParams {
++
++	public static final int ROUTE_EVENT_RECALCULATED = 0;
++	public static final int ROUTE_EVENT_CANCELLED = 1;
++	public static final int ROUTE_EVENT_FINISHED = 2;
++
++	private int eventType;
++	private boolean newRoute;
++	private int routeVersion;
++	private int remainingDistanceM;
++	private String profileKey;
++	private int routeSource = ActiveRouteGeometry.ROUTE_SOURCE_UNKNOWN;
++	private boolean planningMode;
++
++	public ARouteUpdate() {
++	}
++
++	public ARouteUpdate(int eventType, boolean newRoute, int routeVersion, int remainingDistanceM,
++	                    String profileKey, int routeSource, boolean planningMode) {
++		this.eventType = eventType;
++		this.newRoute = newRoute;
++		this.routeVersion = routeVersion;
++		this.remainingDistanceM = remainingDistanceM;
++		this.profileKey = profileKey;
++		this.routeSource = routeSource;
++		this.planningMode = planningMode;
++	}
++
++	protected ARouteUpdate(Parcel in) {
++		readFromParcel(in);
++	}
++
++	public static final Creator<ARouteUpdate> CREATOR = new Creator<ARouteUpdate>() {
++		@Override
++		public ARouteUpdate createFromParcel(Parcel in) {
++			return new ARouteUpdate(in);
++		}
++
++		@Override
++		public ARouteUpdate[] newArray(int size) {
++			return new ARouteUpdate[size];
++		}
++	};
++
++	public int getEventType() {
++		return eventType;
++	}
++
++	public void setEventType(int eventType) {
++		this.eventType = eventType;
++	}
++
++	public boolean isNewRoute() {
++		return newRoute;
++	}
++
++	public void setNewRoute(boolean newRoute) {
++		this.newRoute = newRoute;
++	}
++
++	public int getRouteVersion() {
++		return routeVersion;
++	}
++
++	public void setRouteVersion(int routeVersion) {
++		this.routeVersion = routeVersion;
++	}
++
++	public int getRemainingDistanceM() {
++		return remainingDistanceM;
++	}
++
++	public void setRemainingDistanceM(int remainingDistanceM) {
++		this.remainingDistanceM = remainingDistanceM;
++	}
++
++	public String getProfileKey() {
++		return profileKey;
++	}
++
++	public void setProfileKey(String profileKey) {
++		this.profileKey = profileKey;
++	}
++
++	public int getRouteSource() {
++		return routeSource;
++	}
++
++	public void setRouteSource(int routeSource) {
++		this.routeSource = routeSource;
++	}
++
++	public boolean isPlanningMode() {
++		return planningMode;
++	}
++
++	public void setPlanningMode(boolean planningMode) {
++		this.planningMode = planningMode;
++	}
++
++	@Override
++	protected void readFromBundle(Bundle bundle) {
++		eventType = bundle.getInt("eventType");
++		newRoute = bundle.getBoolean("newRoute");
++		routeVersion = bundle.getInt("routeVersion");
++		remainingDistanceM = bundle.getInt("remainingDistanceM");
++		profileKey = bundle.getString("profileKey");
++		routeSource = bundle.getInt("routeSource", ActiveRouteGeometry.ROUTE_SOURCE_UNKNOWN);
++		planningMode = bundle.getBoolean("planningMode");
++	}
++
++	@Override
++	public void writeToBundle(Bundle bundle) {
++		bundle.putInt("eventType", eventType);
++		bundle.putBoolean("newRoute", newRoute);
++		bundle.putInt("routeVersion", routeVersion);
++		bundle.putInt("remainingDistanceM", remainingDistanceM);
++		bundle.putString("profileKey", profileKey);
++		bundle.putInt("routeSource", routeSource);
++		bundle.putBoolean("planningMode", planningMode);
++	}
++}
+diff --git a/OsmAnd-api/src/net/osmand/aidlapi/navigation/ARouteUpdateParams.aidl b/OsmAnd-api/src/net/osmand/aidlapi/navigation/ARouteUpdateParams.aidl
+new file mode 100644
+index 0000000000..5da16b785c
+--- /dev/null
++++ b/OsmAnd-api/src/net/osmand/aidlapi/navigation/ARouteUpdateParams.aidl
+@@ -0,0 +1,4 @@
++
++package net.osmand.aidlapi.navigation;
++
++parcelable ARouteUpdateParams;
+diff --git a/OsmAnd-api/src/net/osmand/aidlapi/navigation/ARouteUpdateParams.java b/OsmAnd-api/src/net/osmand/aidlapi/navigation/ARouteUpdateParams.java
+new file mode 100644
+index 0000000000..a6ed0d7872
+--- /dev/null
++++ b/OsmAnd-api/src/net/osmand/aidlapi/navigation/ARouteUpdateParams.java
+@@ -0,0 +1,59 @@
++package net.osmand.aidlapi.navigation;
++
++import android.os.Bundle;
++import android.os.Parcel;
++
++import net.osmand.aidlapi.AidlParams;
++
++public class ARouteUpdateParams extends AidlParams {
++
++	private boolean subscribeToUpdates = true;
++	private long callbackId = -1L;
++
++	public ARouteUpdateParams() {
++	}
++
++	protected ARouteUpdateParams(Parcel in) {
++		readFromParcel(in);
++	}
++
++	public static final Creator<ARouteUpdateParams> CREATOR = new Creator<ARouteUpdateParams>() {
++		@Override
++		public ARouteUpdateParams createFromParcel(Parcel in) {
++			return new ARouteUpdateParams(in);
++		}
++
++		@Override
++		public ARouteUpdateParams[] newArray(int size) {
++			return new ARouteUpdateParams[size];
++		}
++	};
++
++	public long getCallbackId() {
++		return callbackId;
++	}
++
++	public void setCallbackId(long callbackId) {
++		this.callbackId = callbackId;
++	}
++
++	public boolean isSubscribeToUpdates() {
++		return subscribeToUpdates;
++	}
++
++	public void setSubscribeToUpdates(boolean subscribeToUpdates) {
++		this.subscribeToUpdates = subscribeToUpdates;
++	}
++
++	@Override
++	protected void readFromBundle(Bundle bundle) {
++		callbackId = bundle.getLong("callbackId", -1L);
++		subscribeToUpdates = bundle.getBoolean("subscribeToUpdates", true);
++	}
++
++	@Override
++	public void writeToBundle(Bundle bundle) {
++		bundle.putLong("callbackId", callbackId);
++		bundle.putBoolean("subscribeToUpdates", subscribeToUpdates);
++	}
++}
+diff --git a/OsmAnd-api/src/net/osmand/aidlapi/navigation/ActiveRouteGeometry.aidl b/OsmAnd-api/src/net/osmand/aidlapi/navigation/ActiveRouteGeometry.aidl
+new file mode 100644
+index 0000000000..ba091ac4e0
+--- /dev/null
++++ b/OsmAnd-api/src/net/osmand/aidlapi/navigation/ActiveRouteGeometry.aidl
+@@ -0,0 +1,4 @@
++
++package net.osmand.aidlapi.navigation;
++
++parcelable ActiveRouteGeometry;
+diff --git a/OsmAnd-api/src/net/osmand/aidlapi/navigation/ActiveRouteGeometry.java b/OsmAnd-api/src/net/osmand/aidlapi/navigation/ActiveRouteGeometry.java
+new file mode 100644
+index 0000000000..aba1b28497
+--- /dev/null
++++ b/OsmAnd-api/src/net/osmand/aidlapi/navigation/ActiveRouteGeometry.java
+@@ -0,0 +1,141 @@
++package net.osmand.aidlapi.navigation;
++
++import android.os.Bundle;
++import android.os.Parcel;
++
++import net.osmand.aidlapi.AidlParams;
++import net.osmand.aidlapi.map.ALatLon;
++
++import java.util.ArrayList;
++import java.util.List;
++
++public class ActiveRouteGeometry extends AidlParams {
++
++	public static final int ROUTE_SOURCE_OSMAND = 0;
++	public static final int ROUTE_SOURCE_BROUTER = 1;
++	public static final int ROUTE_SOURCE_STRAIGHT = 2;
++	public static final int ROUTE_SOURCE_DIRECT_TO = 3;
++	public static final int ROUTE_SOURCE_ONLINE = 4;
++	public static final int ROUTE_SOURCE_UNKNOWN = 5;
++
++	private ArrayList<ALatLon> points = new ArrayList<>();
++	private int totalDistanceM;
++	private int remainingDistanceM;
++	private String profileKey;
++	private int routeSource = ROUTE_SOURCE_UNKNOWN;
++	private int routeVersion;
++	private long calculatedAt;
++	private boolean planningMode;
++
++	public ActiveRouteGeometry() {
++	}
++
++	protected ActiveRouteGeometry(Parcel in) {
++		readFromParcel(in);
++	}
++
++	public static final Creator<ActiveRouteGeometry> CREATOR = new Creator<ActiveRouteGeometry>() {
++		@Override
++		public ActiveRouteGeometry createFromParcel(Parcel in) {
++			return new ActiveRouteGeometry(in);
++		}
++
++		@Override
++		public ActiveRouteGeometry[] newArray(int size) {
++			return new ActiveRouteGeometry[size];
++		}
++	};
++
++	public List<ALatLon> getPoints() {
++		return points;
++	}
++
++	public void setPoints(List<ALatLon> points) {
++		this.points = new ArrayList<>();
++		if (points != null) {
++			this.points.addAll(points);
++		}
++	}
++
++	public int getTotalDistanceM() {
++		return totalDistanceM;
++	}
++
++	public void setTotalDistanceM(int totalDistanceM) {
++		this.totalDistanceM = totalDistanceM;
++	}
++
++	public int getRemainingDistanceM() {
++		return remainingDistanceM;
++	}
++
++	public void setRemainingDistanceM(int remainingDistanceM) {
++		this.remainingDistanceM = remainingDistanceM;
++	}
++
++	public String getProfileKey() {
++		return profileKey;
++	}
++
++	public void setProfileKey(String profileKey) {
++		this.profileKey = profileKey;
++	}
++
++	public int getRouteSource() {
++		return routeSource;
++	}
++
++	public void setRouteSource(int routeSource) {
++		this.routeSource = routeSource;
++	}
++
++	public int getRouteVersion() {
++		return routeVersion;
++	}
++
++	public void setRouteVersion(int routeVersion) {
++		this.routeVersion = routeVersion;
++	}
++
++	public long getCalculatedAt() {
++		return calculatedAt;
++	}
++
++	public void setCalculatedAt(long calculatedAt) {
++		this.calculatedAt = calculatedAt;
++	}
++
++	public boolean isPlanningMode() {
++		return planningMode;
++	}
++
++	public void setPlanningMode(boolean planningMode) {
++		this.planningMode = planningMode;
++	}
++
++	@Override
++	protected void readFromBundle(Bundle bundle) {
++		bundle.setClassLoader(ALatLon.class.getClassLoader());
++		ArrayList<ALatLon> readPoints = bundle.getParcelableArrayList("points");
++		points = readPoints != null ? readPoints : new ArrayList<>();
++		totalDistanceM = bundle.getInt("totalDistanceM");
++		remainingDistanceM = bundle.getInt("remainingDistanceM");
++		profileKey = bundle.getString("profileKey");
++		routeSource = bundle.getInt("routeSource", ROUTE_SOURCE_UNKNOWN);
++		routeVersion = bundle.getInt("routeVersion");
++		calculatedAt = bundle.getLong("calculatedAt");
++		planningMode = bundle.getBoolean("planningMode");
++	}
++
++	@Override
++	public void writeToBundle(Bundle bundle) {
++		bundle.putParcelableArrayList("points", points);
++		bundle.putInt("totalDistanceM", totalDistanceM);
++		bundle.putInt("remainingDistanceM", remainingDistanceM);
++		bundle.putString("profileKey", profileKey);
++		bundle.putInt("routeSource", routeSource);
++		bundle.putInt("routeVersion", routeVersion);
++		bundle.putLong("calculatedAt", calculatedAt);
++		bundle.putBoolean("planningMode", planningMode);
++	}
++}
+diff --git a/OsmAnd-api/src/net/osmand/aidlapi/navigation/GetActiveRouteParams.aidl b/OsmAnd-api/src/net/osmand/aidlapi/navigation/GetActiveRouteParams.aidl
+new file mode 100644
+index 0000000000..bbb0aecae3
+--- /dev/null
++++ b/OsmAnd-api/src/net/osmand/aidlapi/navigation/GetActiveRouteParams.aidl
+@@ -0,0 +1,4 @@
++
++package net.osmand.aidlapi.navigation;
++
++parcelable GetActiveRouteParams;
+diff --git a/OsmAnd-api/src/net/osmand/aidlapi/navigation/GetActiveRouteParams.java b/OsmAnd-api/src/net/osmand/aidlapi/navigation/GetActiveRouteParams.java
+new file mode 100644
+index 0000000000..2e7ba4b9d6
+--- /dev/null
++++ b/OsmAnd-api/src/net/osmand/aidlapi/navigation/GetActiveRouteParams.java
+@@ -0,0 +1,52 @@
++package net.osmand.aidlapi.navigation;
++
++import android.os.Bundle;
++import android.os.Parcel;
++
++import net.osmand.aidlapi.AidlParams;
++
++public class GetActiveRouteParams extends AidlParams {
++
++	private boolean includePassedSegment;
++
++	public GetActiveRouteParams() {
++	}
++
++	public GetActiveRouteParams(boolean includePassedSegment) {
++		this.includePassedSegment = includePassedSegment;
++	}
++
++	protected GetActiveRouteParams(Parcel in) {
++		readFromParcel(in);
++	}
++
++	public static final Creator<GetActiveRouteParams> CREATOR = new Creator<GetActiveRouteParams>() {
++		@Override
++		public GetActiveRouteParams createFromParcel(Parcel in) {
++			return new GetActiveRouteParams(in);
++		}
++
++		@Override
++		public GetActiveRouteParams[] newArray(int size) {
++			return new GetActiveRouteParams[size];
++		}
++	};
++
++	public boolean isIncludePassedSegment() {
++		return includePassedSegment;
++	}
++
++	public void setIncludePassedSegment(boolean includePassedSegment) {
++		this.includePassedSegment = includePassedSegment;
++	}
++
++	@Override
++	protected void readFromBundle(Bundle bundle) {
++		includePassedSegment = bundle.getBoolean("includePassedSegment");
++	}
++
++	@Override
++	public void writeToBundle(Bundle bundle) {
++		bundle.putBoolean("includePassedSegment", includePassedSegment);
++	}
++}
+diff --git a/OsmAnd/src/net/osmand/aidl/AidlCallbackListenerV2.java b/OsmAnd/src/net/osmand/aidl/AidlCallbackListenerV2.java
+index a1579da12d..a2b38fa632 100644
+--- a/OsmAnd/src/net/osmand/aidl/AidlCallbackListenerV2.java
++++ b/OsmAnd/src/net/osmand/aidl/AidlCallbackListenerV2.java
+@@ -16,7 +16,9 @@ public interface AidlCallbackListenerV2 {
+ 	 *                 2 - key for registerForNavigationUpdates(...)
+ 	 *                 4 - key for onContextMenuButtonClicked(...)
+ 	 *                 8 - key for... future use
+-	 *                 16 - key for... future use
++	 *                 16 - key for registerForKeyEvents(...)
++	 *                 32 - key for registerForLogcatMessages(...)
++	 *                 64 - key for registerForRouteUpdates(...)
+ 	 * @return long - unique id of callback. Could be used for unregistering callback
+ 	 */
+ 	long addAidlCallback(IOsmAndAidlCallback callback, int key);
+diff --git a/OsmAnd/src/net/osmand/aidl/OsmandAidlApi.java b/OsmAnd/src/net/osmand/aidl/OsmandAidlApi.java
+index 1ddde093f8..7e64736efa 100644
+--- a/OsmAnd/src/net/osmand/aidl/OsmandAidlApi.java
++++ b/OsmAnd/src/net/osmand/aidl/OsmandAidlApi.java
+@@ -57,10 +57,14 @@ import net.osmand.aidlapi.logcat.OnLogcatMessageParams;
+ import net.osmand.aidlapi.map.ALatLon;
+ import net.osmand.aidlapi.map.ALocation;
+ import net.osmand.aidlapi.navigation.ABlockedRoad;
++import net.osmand.aidlapi.navigation.ARouteUpdate;
++import net.osmand.aidlapi.navigation.ActiveRouteGeometry;
++import net.osmand.aidlapi.navigation.GetActiveRouteParams;
+ import net.osmand.aidlapi.navigation.NavigateGpxParams;
+ import net.osmand.data.FavouritePoint;
+ import net.osmand.data.LatLon;
+ import net.osmand.data.PointDescription;
++import net.osmand.data.ValueHolder;
+ import net.osmand.plus.AppInitializeListener;
+ import net.osmand.plus.AppInitializer;
+ import net.osmand.plus.OsmAndTaskManager;
+@@ -94,8 +98,11 @@ import net.osmand.plus.plugins.rastermaps.OsmandRasterMapsPlugin;
+ import net.osmand.plus.quickaction.MapButtonsHelper;
+ import net.osmand.plus.quickaction.QuickAction;
+ import net.osmand.plus.resources.SQLiteTileSource;
++import net.osmand.plus.routing.IRouteInformationListener;
+ import net.osmand.plus.routing.IRoutingDataUpdateListener;
+ import net.osmand.plus.routing.NextDirectionInfo;
++import net.osmand.plus.routing.RouteCalculationResult;
++import net.osmand.plus.routing.RouteService;
+ import net.osmand.plus.routing.RoutingHelper;
+ import net.osmand.plus.routing.VoiceRouter;
+ import net.osmand.plus.routing.VoiceRouter.VoiceMessageListener;
+@@ -161,6 +168,7 @@ public class OsmandAidlApi {
+ 	public static final int KEY_ON_VOICE_MESSAGE = 8;
+ 	public static final int KEY_ON_KEY_EVENT = 16;
+ 	public static final int KEY_ON_LOGCAT_MESSAGE = 32;
++	public static final int KEY_ON_ROUTE_UPDATE = 64;
+ 
+ 	public static final String WIDGET_ID_PREFIX = "aidl_widget_";
+ 
+@@ -231,6 +239,7 @@ public class OsmandAidlApi {
+ 	private Map<String, BroadcastReceiver> receivers = new TreeMap<>();
+ 	private final Map<String, ConnectedApp> connectedApps = new ConcurrentHashMap<>();
+ 	private final Map<Long, IRoutingDataUpdateListener> navUpdateCallbacks = new ConcurrentHashMap<>();
++	private final Map<Long, IRouteInformationListener> routeUpdateCallbacks = new ConcurrentHashMap<>();
+ 	private final Map<String, AidlContextMenuButtonsWrapper> contextMenuButtonsParams = new ConcurrentHashMap<>();
+ 	private final Map<Long, VoiceRouter.VoiceMessageListener> voiceRouterMessageCallbacks = new ConcurrentHashMap<>();
+ 	private final Map<Long, Set<Integer>> keyEventCallbacks = new ConcurrentHashMap<>();
+@@ -2123,6 +2132,135 @@ public class OsmandAidlApi {
+ 		}
+ 	}
+ 
++	public boolean getActiveRouteGeometry(@NonNull GetActiveRouteParams params,
++	                                      @NonNull ActiveRouteGeometry result) {
++		RoutingHelper rh = app.getRoutingHelper();
++		if (!rh.isRouteCalculated() || rh.isRouteBeingCalculated()) {
++			return false;
++		}
++		RouteCalculationResult route = rh.getRoute();
++		List<Location> locations = params.isIncludePassedSegment()
++				? route.getImmutableAllLocations()
++				: route.getRouteLocations();
++		if (locations.size() < 2) {
++			return false;
++		}
++		List<ALatLon> points = new ArrayList<>(locations.size());
++		for (Location location : locations) {
++			points.add(new ALatLon(location.getLatitude(), location.getLongitude()));
++		}
++		result.setPoints(points);
++		fillActiveRouteGeometryMetadata(result, rh, route, locations);
++		return true;
++	}
++
++	void registerForRouteUpdates(long id) {
++		IRouteInformationListener listener = new IRouteInformationListener() {
++			@Override
++			public void newRouteIsCalculated(boolean newRoute, ValueHolder<Boolean> showToast) {
++				dispatchRouteUpdate(id, ARouteUpdate.ROUTE_EVENT_RECALCULATED, newRoute);
++			}
++
++			@Override
++			public void routeWasCancelled() {
++				dispatchRouteUpdate(id, ARouteUpdate.ROUTE_EVENT_CANCELLED, false);
++			}
++
++			@Override
++			public void routeWasFinished() {
++				dispatchRouteUpdate(id, ARouteUpdate.ROUTE_EVENT_FINISHED, false);
++			}
++		};
++		routeUpdateCallbacks.put(id, listener);
++		app.getRoutingHelper().addListener(listener);
++	}
++
++	public boolean unregisterFromRouteUpdates(long id) {
++		IRouteInformationListener listener = routeUpdateCallbacks.remove(id);
++		if (listener != null) {
++			app.getRoutingHelper().removeListener(listener);
++			return true;
++		}
++		return false;
++	}
++
++	private void fillActiveRouteGeometryMetadata(@NonNull ActiveRouteGeometry out,
++	                                             @NonNull RoutingHelper rh,
++	                                             @NonNull RouteCalculationResult route,
++	                                             @NonNull List<Location> locations) {
++		int remainingDistanceM = rh.getLeftDistance();
++		out.setTotalDistanceM(route.getWholeDistance());
++		out.setRemainingDistanceM(remainingDistanceM);
++		out.setProfileKey(rh.getAppMode().getStringKey());
++		out.setRouteSource(mapRouteSource(route.getRouteService()));
++		out.setRouteVersion(computeRouteVersion(locations, remainingDistanceM));
++		out.setCalculatedAt(System.currentTimeMillis());
++		out.setPlanningMode(rh.isRoutePlanningMode());
++	}
++
++	private ARouteUpdate buildRouteUpdate(int eventType, boolean newRoute, @NonNull RoutingHelper rh) {
++		RouteCalculationResult route = rh.getRoute();
++		List<Location> locations = route.getRouteLocations();
++		int remainingDistanceM = eventType == ARouteUpdate.ROUTE_EVENT_CANCELLED
++				|| eventType == ARouteUpdate.ROUTE_EVENT_FINISHED ? 0 : rh.getLeftDistance();
++		ARouteUpdate update = new ARouteUpdate();
++		update.setEventType(eventType);
++		update.setNewRoute(newRoute);
++		update.setRemainingDistanceM(remainingDistanceM);
++		update.setProfileKey(rh.getAppMode().getStringKey());
++		update.setRouteSource(mapRouteSource(route.getRouteService()));
++		update.setRouteVersion(computeRouteVersion(locations, remainingDistanceM));
++		update.setPlanningMode(rh.isRoutePlanningMode());
++		return update;
++	}
++
++	private void dispatchRouteUpdate(long callbackId, int eventType, boolean newRoute) {
++		if (aidlCallbackListenerV2 == null || !routeUpdateCallbacks.containsKey(callbackId)) {
++			return;
++		}
++		OsmandAidlServiceV2.AidlCallbackParams cb = aidlCallbackListenerV2.getAidlCallbacks().get(callbackId);
++		if (cb == null || (cb.getKey() & KEY_ON_ROUTE_UPDATE) == 0) {
++			return;
++		}
++		try {
++			cb.getCallback().onRouteUpdate(buildRouteUpdate(eventType, newRoute, app.getRoutingHelper()));
++		} catch (Exception e) {
++			LOG.error(e.getMessage(), e);
++		}
++	}
++
++	private static int computeRouteVersion(@NonNull List<Location> locations, int remainingDistanceM) {
++		if (locations.isEmpty()) {
++			return 0;
++		}
++		Location first = locations.get(0);
++		Location last = locations.get(locations.size() - 1);
++		return Objects.hash(locations.size(),
++				(int) (first.getLatitude() * 1e5), (int) (first.getLongitude() * 1e5),
++				(int) (last.getLatitude() * 1e5), (int) (last.getLongitude() * 1e5),
++				remainingDistanceM);
++	}
++
++	private static int mapRouteSource(@Nullable RouteService service) {
++		if (service == null) {
++			return ActiveRouteGeometry.ROUTE_SOURCE_UNKNOWN;
++		}
++		switch (service) {
++			case OSMAND:
++				return ActiveRouteGeometry.ROUTE_SOURCE_OSMAND;
++			case BROUTER:
++				return ActiveRouteGeometry.ROUTE_SOURCE_BROUTER;
++			case STRAIGHT:
++				return ActiveRouteGeometry.ROUTE_SOURCE_STRAIGHT;
++			case DIRECT_TO:
++				return ActiveRouteGeometry.ROUTE_SOURCE_DIRECT_TO;
++			case ONLINE:
++				return ActiveRouteGeometry.ROUTE_SOURCE_ONLINE;
++			default:
++				return ActiveRouteGeometry.ROUTE_SOURCE_UNKNOWN;
++		}
++	}
++
+ 	public void registerForVoiceRouterMessages(long id) {
+ 		VoiceRouter.VoiceMessageListener listener = (cmds, played) -> {
+ 			if (aidlCallbackListener != null) {
+diff --git a/OsmAnd/src/net/osmand/aidl/OsmandAidlServiceV2.java b/OsmAnd/src/net/osmand/aidl/OsmandAidlServiceV2.java
+index 8f03ed8760..58b59ff738 100644
+--- a/OsmAnd/src/net/osmand/aidl/OsmandAidlServiceV2.java
++++ b/OsmAnd/src/net/osmand/aidl/OsmandAidlServiceV2.java
+@@ -4,6 +4,7 @@ import static net.osmand.aidl.OsmandAidlApi.KEY_ON_CONTEXT_MENU_BUTTONS_CLICK;
+ import static net.osmand.aidl.OsmandAidlApi.KEY_ON_KEY_EVENT;
+ import static net.osmand.aidl.OsmandAidlApi.KEY_ON_LOGCAT_MESSAGE;
+ import static net.osmand.aidl.OsmandAidlApi.KEY_ON_NAV_DATA_UPDATE;
++import static net.osmand.aidl.OsmandAidlApi.KEY_ON_ROUTE_UPDATE;
+ import static net.osmand.aidl.OsmandAidlApi.KEY_ON_UPDATE;
+ import static net.osmand.aidl.OsmandAidlApi.KEY_ON_VOICE_MESSAGE;
+ import static net.osmand.aidlapi.OsmandAidlConstants.CANNOT_ACCESS_API_ERROR;
+@@ -97,6 +98,9 @@ import net.osmand.aidlapi.navigation.ABlockedRoad;
+ import net.osmand.aidlapi.navigation.ANavigationUpdateParams;
+ import net.osmand.aidlapi.navigation.ANavigationVoiceRouterMessageParams;
+ import net.osmand.aidlapi.navigation.AddBlockedRoadParams;
++import net.osmand.aidlapi.navigation.ARouteUpdateParams;
++import net.osmand.aidlapi.navigation.ActiveRouteGeometry;
++import net.osmand.aidlapi.navigation.GetActiveRouteParams;
+ import net.osmand.aidlapi.navigation.MuteNavigationParams;
+ import net.osmand.aidlapi.navigation.NavigateGpxParams;
+ import net.osmand.aidlapi.navigation.NavigateParams;
+@@ -1578,6 +1582,56 @@ public class OsmandAidlServiceV2 extends Service implements AidlCallbackListener
+ 				return false;
+ 			}
+ 		}
++
++		@Override
++		public boolean getActiveRouteGeometry(GetActiveRouteParams params, ActiveRouteGeometry result) {
++			try {
++				OsmandAidlApi api = getApi("getActiveRouteGeometry");
++				return params != null && result != null && api != null
++						&& api.getActiveRouteGeometry(params, result);
++			} catch (Exception e) {
++				handleException(e);
++				return false;
++			}
++		}
++
++		@Override
++		public long registerForRouteUpdates(ARouteUpdateParams params, IOsmAndAidlCallback callback) {
++			try {
++				OsmandAidlApi api = getApi("registerForRouteUpdates");
++				if (api != null) {
++					if (!params.isSubscribeToUpdates() && params.getCallbackId() != -1) {
++						api.unregisterFromRouteUpdates(params.getCallbackId());
++						removeAidlCallback(params.getCallbackId());
++						return -1;
++					} else {
++						long id = addAidlCallback(callback, KEY_ON_ROUTE_UPDATE);
++						api.registerForRouteUpdates(id);
++						return id;
++					}
++				} else {
++					return -1;
++				}
++			} catch (Exception e) {
++				handleException(e);
++				return UNKNOWN_API_ERROR;
++			}
++		}
++
++		@Override
++		public boolean unregisterFromRouteUpdates(long callbackId) {
++			try {
++				OsmandAidlApi api = getApi("unregisterFromRouteUpdates");
++				if (api != null) {
++					api.unregisterFromRouteUpdates(callbackId);
++					return removeAidlCallback(callbackId);
++				}
++				return false;
++			} catch (Exception e) {
++				handleException(e);
++				return false;
++			}
++		}
+ 	};
+ 
+ 	private void setCustomization(OsmandAidlApi api, CustomizationInfoParams params) {
+-- 
+2.47.3
+
