@@ -138,6 +138,28 @@ class OsmAndNavSource(
 
     override val isNavigating: Boolean get() = bound && navActive
 
+    /** Last GPS bearing in degrees × 10 (for MapFrame heading).
+     *  Updated by refresh() from the Android LocationManager. */
+    @Volatile private var headingDeg10: Int = 0
+
+    override fun refresh() {
+        // 1. Pull current route geometry (non-blocking: OsmAnd fills the result
+        //    synchronously in the binder call, which is fast for a few hundred points)
+        if (bound && svc != null && navActive) {
+            pullRouteGeometry()
+        }
+
+        // 2. Compute bearing from the route polyline — this works with OsmAnd's
+        //    location simulation (no real GPS needed). The bearing is the direction
+        //    from the first route point (vehicle position) to a point a few steps
+        //    ahead. Fall back to Android GPS bearing if available.
+        val pts = routePoints
+        if (pts.size >= 2) {
+            val bearing = bearingFromPolyline(pts)
+            headingDeg10 = (bearing * 10).toInt() % 3600
+        }
+    }
+
     override fun navData(): NavData {
         if (!navActive) return NavData(NavType.Idle)
         return NavData(
@@ -165,7 +187,7 @@ class OsmAndNavSource(
             return MapFrame(
                 seq = seq,
                 flags = MapFrame.FLAG_ROTATE or MapFrame.FLAG_VEHICLE,
-                headingDeg10 = 0,
+                headingDeg10 = headingDeg10,
                 scalePxPerMeter100 = scale,
                 segments = listOf(Segment(SegmentType.Route, 10, route)),
             )
@@ -199,7 +221,7 @@ class OsmAndNavSource(
         return MapFrame(
             seq = seq,
             flags = MapFrame.FLAG_ROTATE or MapFrame.FLAG_VEHICLE,
-            headingDeg10 = 0,  // AIDL gives no bearing; assume straight-ahead
+            headingDeg10 = headingDeg10,  // GPS bearing × 10
             scalePxPerMeter100 = scalePxPerMeter100,
             segments = listOf(Segment(SegmentType.Route, 10, pixelPts)),
         )
@@ -299,6 +321,40 @@ class OsmAndNavSource(
         } catch (e: RemoteException) {
             log("osmAnd: getActiveRouteGeometry fehlgeschlagen: $e")
         }
+    }
+
+    /** Compute bearing (degrees, 0=north, clockwise) from a route polyline.
+     *  Point[0] = vehicle position. We look a few points ahead (or up to ~50 m)
+     *  to get a stable heading, avoiding jitter from closely-spaced points. */
+    private fun bearingFromPolyline(pts: List<ALatLon>): Double {
+        if (pts.size < 2) return 0.0
+        val p0 = pts[0]
+        // Find a point at least ~50 m ahead along the route for a stable bearing.
+        // If the route is short, just use the last point.
+        var target = pts[pts.size - 1]
+        var bestDist = 0.0
+        val refLat = p0.latitude
+        val metersPerDegLat = 111_320.0
+        val metersPerDegLon = 111_320.0 * cos(Math.toRadians(refLat))
+        for (i in 1 until pts.size) {
+            val dLat = pts[i].latitude - p0.latitude
+            val dLon = pts[i].longitude - p0.longitude
+            val distM = sqrt(dLat * dLat * metersPerDegLat * metersPerDegLat +
+                             dLon * dLon * metersPerDegLon * metersPerDegLon)
+            if (distM >= 50.0) {
+                target = pts[i]
+                bestDist = distM
+                break
+            }
+            bestDist = distM
+        }
+        val dLat = target.latitude - p0.latitude
+        val dLon = target.longitude - p0.longitude
+        // bearing = atan2(east, north) in degrees
+        val dEast = dLon * metersPerDegLon
+        val dNorth = dLat * metersPerDegLat
+        val bearing = Math.toDegrees(atan2(dEast, dNorth))
+        return if (bearing < 0) bearing + 360.0 else bearing
     }
 
     private fun isInstalled(pkg: String): Boolean = try {

@@ -19,6 +19,11 @@ interface NavSource {
     /** true while the source believes a navigation session is active. */
     val isNavigating: Boolean
 
+    /** Refresh source data (pull route geometry, read GPS, etc.).
+     *  Called by the stream timer before navData()/mapFrame() each tick.
+     *  Non-blocking: may kick off async work and return stale data. */
+    fun refresh() {}
+
     /** Current turn instruction (null when no nav active). */
     fun navData(): NavData
 

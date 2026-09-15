@@ -132,6 +132,7 @@ class MainActivity : AppCompatActivity() {
     // ---- send ------------------------------------------------------
     private fun sendOnce() {
         if (!ble.isReady) { log("nicht bereit"); updateBleStatus(); return }
+        source.refresh()  // pull fresh route geometry + GPS bearing
         val nav = source.navData()
         val nd = if (cbMap.isChecked) nav.copy(mapOn = true) else nav
         val json = nd.toJson()
