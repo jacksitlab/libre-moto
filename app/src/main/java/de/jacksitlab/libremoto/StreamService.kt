@@ -59,6 +59,13 @@ class StreamService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var wakeLock: PowerManager.WakeLock? = null
 
+    /** Own thread for the pump: refresh() makes a synchronous binder call
+     *  into OsmAnd (route geometry, 10-500 ms) — running that on the main
+     *  looper delayed every BLE callback when OsmAnd was in the foreground. */
+    private var pumpThread: java.util.concurrent.atomic.AtomicReference<Thread?> =
+        java.util.concurrent.atomic.AtomicReference(null)
+    private val pumpSleep = java.util.concurrent.Semaphore(0)
+
     override fun onCreate() {
         super.onCreate()
         createChannel()
@@ -86,13 +93,17 @@ class StreamService : Service() {
     }
 
     private fun startPump() {
-        handler.post(object : Runnable {
-            override fun run() {
-                if (!running) return
-                pumpOnce()
-                handler.postDelayed(this, 1000)
+        // Pump on its own thread (see field comment): refresh() blocks on a
+        // binder call into OsmAnd, which the main looper must not wait for.
+        val t = Thread {
+            while (running) {
+                try { pumpOnce() } catch (e: Exception) { Log.d(TAG, "pump: ${e.message}") }
+                try { pumpSleep.tryAcquire(1000, java.util.concurrent.TimeUnit.MILLISECONDS) } catch (_: InterruptedException) { break }
             }
-        })
+        }
+        t.name = "LibreMoto-pump"
+        pumpThread.set(t)
+        t.start()
     }
 
     private fun pumpOnce() {
@@ -136,6 +147,7 @@ class StreamService : Service() {
 
     override fun onDestroy() {
         running = false
+        pumpThread.get()?.interrupt()
         wakeLock?.release()
         super.onDestroy()
     }

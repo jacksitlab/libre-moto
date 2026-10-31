@@ -56,6 +56,72 @@ class BleController(private val context: Context, log: (String) -> Unit) {
 
     val isReady: Boolean get() = connected && chNav != null && chMap != null
 
+    // ---- serialized TX queue -------------------------------------------
+    // Android BLE allows exactly ONE writeCharacteristic in flight; a second
+    // call while one is pending returns false and the payload is silently
+    // dropped. NavData ticks (main loop) and map chunks (postDelayed pump) used
+    // to collide exactly there — visible as stutter once the app is backgrounded.
+    // Every write now goes through this queue: send next only after
+    // onCharacteristicWrite of the previous one fired (callback-driven, no gaps).
+    private object Tx {
+        val queue = java.util.concurrent.ConcurrentLinkedQueue<ByteArray>()
+        @Volatile var busy = false            // one write in flight
+        @Volatile var active = false         // set once the GATT link is usable
+    }
+    @Volatile private var droppedMaps = 0L
+    @Volatile private var lastMapDropLog = 0L
+
+    /** Thread-safe: queues a raw payload and pumps if idle. */
+    private fun enqueue(data: ByteArray) {
+        if (!Tx.active) { log("tx: verworfen (nicht verbunden)"); return }
+        Tx.queue.add(data)
+        pumpTx()
+    }
+
+    /** Sends the head of the queue if no write is in flight. Called from
+     *  enqueue() and from onCharacteristicWrite (queue head advanced).
+     *  Synchronized: enqueue runs on the pump thread, the write callback
+     *  arrives on a binder thread — both may pump concurrently. */
+    @Synchronized
+    private fun pumpTx() {
+        if (Tx.busy) return
+        val data = Tx.queue.poll() ?: return
+        val g = gatt.get() ?: run { clearTx("gatt weg"); return }
+        val c = when (data[0].toInt() and 0xFF) {
+            0x01 -> chNav    // NAV marker byte (see sendNavData)
+            0x02 -> chMap    // MAP marker byte (see sendMap)
+            else -> chCtl    // CTL
+        } ?: run { clearTx("channel weg"); return }
+        Tx.busy = true
+        try {
+            c.value = data.copyOfRange(1, data.size)
+            @Suppress("DEPRECATION")
+            val ok = g.writeCharacteristic(c)
+            if (!ok) { Tx.busy = false; log("tx: writeCharacteristic abgelehnt — Chunk verworfen") }
+        } catch (e: SecurityException) {
+            Tx.busy = false
+            log("tx: fehlende Berechtigung")
+        } catch (e: Exception) {
+            Tx.busy = false
+            log("tx: ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    /** onCharacteristicWrite → advance. */
+    private fun onWriteDone(ok: Boolean) {
+        Tx.busy = false
+        pumpTx()
+    }
+
+    /** Drops everything queued (disconnect, missing channels). */
+    private fun clearTx(reason: String) {
+        val n = Tx.queue.size
+        Tx.queue.clear()
+        Tx.busy = false
+        if (n > 0) log("tx: $n Einträge verworfen ($reason)")
+    }
+
+
     fun adapterState(): String = when {
         bt == null -> "BLE: nicht verfügbar"
         adapter == null -> "BLE: Adapter fehlt"
@@ -73,6 +139,7 @@ class BleController(private val context: Context, log: (String) -> Unit) {
                 }
                 android.bluetooth.BluetoothProfile.STATE_DISCONNECTED -> {
                     connected = false
+                    clearTx("Verbindung getrennt")
                     log("Getrennt (status=$status)")
                     g.close()
                 }
@@ -106,12 +173,18 @@ class BleController(private val context: Context, log: (String) -> Unit) {
             chMap = svc.getCharacteristic(Uuid.MAP)
             chCtl = svc.getCharacteristic(Uuid.CTL)
             connected = true
+            if (mtu < 100) {
+                // MTU negotiation failed earlier — map chunks stay small (20 B)
+                // and a NavData JSON may not fit. Log loudly once.
+                log("BLE: MTU nur $mtu — NavData könnte > ${mtu - 3} B sein (stottern!)")
+            }
             log("Service bereit — Chars: nav=" + (chNav != null) +
                 " sts=" + (chSts != null) +
                 " map=" + (chMap != null) +
                 " ctl=" + (chCtl != null))
             subscribeStatus(g)
             readStatusOnce(g)
+            Tx.active = true
         }
 
         /** In-callback helper (avoids clashing with the public readStatus()). */
@@ -137,7 +210,8 @@ class BleController(private val context: Context, log: (String) -> Unit) {
         }
 
         override fun onCharacteristicWrite(g: android.bluetooth.BluetoothGatt, c: android.bluetooth.BluetoothGattCharacteristic, status: Int) {
-            log("Write " + c.uuid.toString().lowercase() + " status=$status" + (if (status != 0) " ⚠" else " ✓"))
+            if (status != 0) log("Write " + c.uuid.toString().lowercase() + " status=$status ⚠")
+            onWriteDone(status == 0)   // pump the TX queue whatever happened
         }
 
         override fun onCharacteristicChanged(g: android.bluetooth.BluetoothGatt, c: android.bluetooth.BluetoothGattCharacteristic) {
@@ -189,62 +263,67 @@ class BleController(private val context: Context, log: (String) -> Unit) {
     }
 
     // ---- writes ----------------------------------------------------
-    private inline fun writeChar(c: android.bluetooth.BluetoothGattCharacteristic, data: ByteArray, tag: String) {
-        val g = gatt.get()
-        if (g == null) { log("$tag: nicht verbunden"); return }
-        if (data.size > mtu - 3) { log("$tag: zu groß ${data.size}B > ${mtu - 3}B"); return }
-        try {
-            c.value = data
-            @Suppress("DEPRECATION")
-            g.writeCharacteristic(c)
-        } catch (e: SecurityException) {
-            log("$tag: fehlende Berechtigung")
-        }
-    }
+    // All writes go through the serialized TX queue (marker byte + payload):
+    // Android allows only one GATT write in flight, so sendNavData()/sendMap()
+    // chunks must not be issued in parallel — see enqueue()/pumpTx().
 
     @SuppressLint("MissingPermission")
     fun sendNavData(json: String) {
-        val c = chNav ?: run { log("nav: Channel fehlt"); return }
-        log("TX nav  (${json.length}B): $json")
-        writeChar(c, json.toByteArray(Charsets.UTF_8), "nav")
+        val payload = json.toByteArray(Charsets.UTF_8)
+        if (payload.size > mtu - 3) {
+            // Would be rejected by the stack anyway; drop instead of stalling the queue.
+            log("nav: verworfen (${payload.size}B > MTU ${mtu - 3}B — MTU-Verhandlung prüfen)")
+            return
+        }
+        log("TX nav  (${payload.size}B): $json")
+        enqueue(byteArrayOf(0x01) + payload)
     }
 
     @SuppressLint("MissingPermission")
     fun sendControl(json: String) {
-        val c = chCtl ?: run { log("ctl: Channel fehlt"); return }
-        log("TX ctl  (${json.length}B): $json")
-        writeChar(c, json.toByteArray(Charsets.UTF_8), "ctl")
+        val payload = json.toByteArray(Charsets.UTF_8)
+        if (payload.size > mtu - 3) {
+            log("ctl: verworfen (${payload.size}B > MTU ${mtu - 3}B)")
+            return
+        }
+        log("TX ctl  (${payload.size}B): $json")
+        enqueue(byteArrayOf(0x03) + payload)
     }
 
-    /** Sends a binary MapFrame (F004), chunked to fit MTU. Serial chunks via a simple 40 ms gap. */
+    /** Sends a binary MapFrame (F004), chunked to fit MTU. Chunks are queued
+     *  atomically: either the whole frame is enqueued (previous map already
+     *  drained) or it is dropped — two frames must never interleave on the
+     *  characteristic, or the firmware reassembly desynchronizes. */
     @SuppressLint("MissingPermission")
     fun sendMap(frame: ByteArray) {
         val c = chMap ?: return log("map: Channel fehlt")
-        val g = gatt.get() ?: return log("map: nicht verbunden")
         val chunk = mapChunk
-        val n = (frame.size + chunk - 1) / chunk
-        var idx = 0
-        val handler = android.os.Handler(android.os.Looper.getMainLooper())
-        log("TX map  (${frame.size}B, $n Chunks): ${hex(frame)}")
-        fun pump() {
-            if (idx >= n) { log("map: fertig ${frame.size}B in $n Chunks"); return }
-            val off = idx * chunk
-            val piece = frame.copyOfRange(off, minOf(off + chunk, frame.size))
-            idx++
-            try {
-                c.value = piece
-                @Suppress("DEPRECATION")
-                g.writeCharacteristic(c)
-            } catch (e: SecurityException) {
-                log("map: fehlende Berechtigung"); return
+        // Header (11 B) + segments must not exceed the protocol frame budget;
+        // encoding already guarantees ≤ MAX_FRAME (4096 B).
+        // Refuse a second concurrent frame: at 1 Hz and full BLE throughput a
+        // frame takes ~0.5 s, but if the link is congested we drop the new one.
+        val queued = Tx.queue.size
+        if (queued > 8) {
+            droppedMaps++
+            val now = System.currentTimeMillis()
+            if (now - lastMapDropLog > 5000) {
+                log("map: Frame verworfen (Queue=$queued, insgesamt $droppedMaps) — Link langsamer als 1 Hz")
+                lastMapDropLog = now
             }
-            handler.postDelayed({ pump() }, 40)
+            return
         }
-        log("map: sende ${frame.size}B in $n Chunks …")
-        pump()
+        val n = (frame.size + chunk - 1) / chunk
+        log("TX map  (${frame.size}B, $n Chunks)")
+        for (i in 0 until n) {
+            val off = i * chunk
+            val piece = frame.copyOfRange(off, minOf(off + chunk, frame.size))
+            enqueue(byteArrayOf(0x02) + piece)
+        }
     }
 
     fun disconnect() {
+        Tx.active = false
+        clearTx("disconnect")
         gatt.get()?.let { g ->
             try { g.disconnect() } catch (e: Exception) {}
             g.close()
@@ -268,4 +347,5 @@ object HexUtil {
 }
 
 /** Compact uppercase hex for binary payloads (MapFrame) in the logcat TX line. */
+@Suppress("unused")
 private fun hex(b: ByteArray): String = b.joinToString("") { "%02X".format(it) }
