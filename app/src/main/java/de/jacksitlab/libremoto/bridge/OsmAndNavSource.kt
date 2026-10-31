@@ -70,6 +70,34 @@ class OsmAndNavSource(
     var lastDirection: ADirectionInfo? = null
         private set
 
+    // ---- speed-adaptive zoom -------------------------------------------
+    // Voraussicht je nach Tempo: ~500 m in der Stadt (langsam, ≤ 30 km/h),
+    // ~1000 m außerhalb (schnell, ≥ 100 km/h), dazwischen linear.
+    // Skala: 240 px sind vor dem Fahrzeug sichtbar (480-px-Panel, Fahrzeug
+    // mittig) → scale = 240 / lookahead_m × 100 (px/m × 100).
+    private val zoomMinLookaheadM = 500.0
+    private val zoomMaxLookaheadM = 1000.0
+    private val zoomLowSpeedKmh = 30.0
+    private val zoomHighSpeedKmh = 100.0
+
+    /** Geglättete Geschwindigkeit km/h (EMA über Ticks, robust gegen GPS-Sprünge). */
+    @Volatile private var smoothedSpeedKmh = 0.0
+    @Volatile private var lastVehiclePos: ALatLon? = null
+    @Volatile private var lastVehiclePosAtMs = 0L
+
+    /** Aktueller Projektionsmaßstab px/m × 100 (wechselt weich mit der Geschwindigkeit). */
+    @Volatile private var dynamicScale = 24   // Start: 1000 m Voraussicht
+    /** Voraussicht in m, die der aktuelle dynamicScale abbildet (für Road-Radius). */
+    @Volatile private var currentLookaheadM = 1000.0
+
+    /** Ziel-Skala aus der geglätteten Geschwindigkeit (px/m × 100). */
+    private fun targetScale(): Int {
+        val t = ((smoothedSpeedKmh - zoomLowSpeedKmh) /
+                 (zoomHighSpeedKmh - zoomLowSpeedKmh)).coerceIn(0.0, 1.0)
+        val lookahead = zoomMinLookaheadM + t * (zoomMaxLookaheadM - zoomMinLookaheadM)
+        return (240.0 / lookahead * 100.0).toInt()
+    }
+
     private val callback = object : IOsmAndAidlCallback.Stub() {
         override fun onSearchComplete(resultSet: List<net.osmand.aidlapi.search.SearchResult>) {}
         override fun onUpdate() {}
@@ -158,6 +186,39 @@ class OsmAndNavSource(
             headingDeg10 = (bearing * 10).toInt() % 3600
         }
 
+        // 2b. Speed from vehicle movement (routePoints[0] = position, 1 Hz ticks)
+        //     EMA-smoothed; skips implausible jumps (> 250 km/h).
+        if (pts.isNotEmpty()) {
+            val pos = pts[0]
+            val now = System.currentTimeMillis()
+            val last = lastVehiclePos
+            val lastAt = lastVehiclePosAtMs
+            if (last != null && lastAt > 0 && now > lastAt) {
+                val dtS = (now - lastAt) / 1000.0
+                val distM = distanceM(last, pos)
+                val kmh = (distM / dtS) * 3.6
+                if (kmh <= 250.0) {
+                    val alpha = 0.3   // EMA: ~3 ticks until a new speed registers
+                    smoothedSpeedKmh = smoothedSpeedKmh * (1 - alpha) + kmh * alpha
+                }
+            }
+            lastVehiclePos = pos
+            lastVehiclePosAtMs = now
+        }
+
+        // 2c. Zoom softly toward the speed-dependent target scale
+        //     (change at most ~2 px/m×100 per tick → no visible jumps).
+        val target = targetScale()
+        val diff = target - dynamicScale
+        dynamicScale = if (kotlin.math.abs(diff) <= 2) target
+                       else dynamicScale + (if (diff > 0) 2 else -2)
+        currentLookaheadM = 240.0 / (dynamicScale / 100.0)
+        if (dynamicScale != lastLoggedScale) {
+            log("osmAnd: zoom: ${"%.0f".format(smoothedSpeedKmh)} km/h → " +
+                "Voraussicht ${"%.0f".format(currentLookaheadM)} m (scale=$dynamicScale)")
+            lastLoggedScale = dynamicScale
+        }
+
         // 3. Pull nearby roads on a background thread (slow: 200-500 ms)
         //    mapFrame() uses the last-pulled roads; they update one tick late.
         if (bound && svc != null && navActive && routePoints.isNotEmpty() && !nearbyPulling) {
@@ -189,9 +250,10 @@ class OsmAndNavSource(
     override fun mapFrame(seq: Int): MapFrame {
         val pts = routePoints
         if (pts.size < 2) {
-            // Fallback: straight placeholder from distanceTo
-            val scale = 10
-            val lenPx = (distanceToM / 10).coerceIn(40, 220)
+            // Fallback: straight placeholder from distanceTo, at the current zoom
+            val scale = dynamicScale
+            val pxPerMeter = scale / 100.0
+            val lenPx = (distanceToM * pxPerMeter).toInt().coerceIn(40, 220)
             val route = listOf(Point(0, 0), Point(0, -lenPx))
             return MapFrame(
                 seq = seq,
@@ -209,7 +271,7 @@ class OsmAndNavSource(
         val metersPerDegLat = 111_320.0
         val metersPerDegLon = 111_320.0 * cos(Math.toRadians(refLat))
 
-        val scalePxPerMeter100 = 30  // 0.30 px/m → 1 px per 3.3 m
+        val scalePxPerMeter100 = dynamicScale   // speed-adaptive, set in refresh()
         val pxPerMeter = scalePxPerMeter100 / 100.0
 
         // Collect all segments: route + nearby roads
@@ -382,7 +444,7 @@ class OsmAndNavSource(
             val params = net.osmand.aidlapi.map.NearbyRoadsParams()
             params.setCenterLat(centerLat)
             params.setCenterLon(centerLon)
-            params.setRadiusMeters(200)  // 500 m radius
+            params.setRadiusMeters(currentLookaheadM.toInt().coerceAtMost(400))  // half the visible window, capped at 400 m for perf
             params.setMaxRoads(20)
             val result = net.osmand.aidlapi.map.NearbyRoadsResult()
             val ok = s.getNearbyRoads(params, result)
@@ -405,6 +467,18 @@ class OsmAndNavSource(
 
     @Volatile private var lastNearbyCount: Int = -1
     @Volatile private var nearbyPulling: Boolean = false
+    @Volatile private var lastLoggedScale: Int = -1
+
+    /** Equirectangular distance in metres between two lat/lon points. */
+    private fun distanceM(a: ALatLon, b: ALatLon): Double {
+        val metersPerDegLat = 111_320.0
+        val metersPerDegLon = 111_320.0 * cos(Math.toRadians(a.latitude))
+        val dLat = b.latitude - a.latitude
+        val dLon = b.longitude - a.longitude
+        val dNorthM = dLat * metersPerDegLat
+        val dEastM = dLon * metersPerDegLon
+        return sqrt(dNorthM * dNorthM + dEastM * dEastM)
+    }
 
     /** Compute bearing (degrees, 0=north, clockwise) from a route polyline.
      *  Point[0] = vehicle position. We look a few points ahead (or up to ~50 m)
