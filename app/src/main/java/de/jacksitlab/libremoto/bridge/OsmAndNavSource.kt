@@ -63,6 +63,9 @@ class OsmAndNavSource(
     @Volatile private var routePoints: List<ALatLon> = emptyList()
     @Volatile private var routeVersion: Int = 0
 
+    // Nearby roads (WGS84 polylines) — refreshed every tick
+    @Volatile private var nearbyRoads: List<net.osmand.aidlapi.map.ARoadPolyline> = emptyList()
+
     // The last directionInfo we got, exposed for tests/inspection.
     var lastDirection: ADirectionInfo? = null
         private set
@@ -143,20 +146,26 @@ class OsmAndNavSource(
     @Volatile private var headingDeg10: Int = 0
 
     override fun refresh() {
-        // 1. Pull current route geometry (non-blocking: OsmAnd fills the result
-        //    synchronously in the binder call, which is fast for a few hundred points)
+        // 1. Pull current route geometry (fast: a few hundred points, ~10 ms)
         if (bound && svc != null && navActive) {
             pullRouteGeometry()
         }
 
-        // 2. Compute bearing from the route polyline — this works with OsmAnd's
-        //    location simulation (no real GPS needed). The bearing is the direction
-        //    from the first route point (vehicle position) to a point a few steps
-        //    ahead. Fall back to Android GPS bearing if available.
+        // 2. Compute bearing from the route polyline
         val pts = routePoints
         if (pts.size >= 2) {
             val bearing = bearingFromPolyline(pts)
             headingDeg10 = (bearing * 10).toInt() % 3600
+        }
+
+        // 3. Pull nearby roads on a background thread (slow: 200-500 ms)
+        //    mapFrame() uses the last-pulled roads; they update one tick late.
+        if (bound && svc != null && navActive && routePoints.isNotEmpty() && !nearbyPulling) {
+            nearbyPulling = true
+            Thread {
+                pullNearbyRoads()
+                nearbyPulling = false
+            }.start()
         }
     }
 
@@ -200,30 +209,59 @@ class OsmAndNavSource(
         val metersPerDegLat = 111_320.0
         val metersPerDegLon = 111_320.0 * cos(Math.toRadians(refLat))
 
-        val scalePxPerMeter100 = 10  // 0.10 px/m → 1 px per 10 m
+        val scalePxPerMeter100 = 30  // 0.30 px/m → 1 px per 3.3 m
         val pxPerMeter = scalePxPerMeter100 / 100.0
 
+        // Collect all segments: route + nearby roads
+        val segments = ArrayList<Segment>(1 + nearbyRoads.size)
+
+        // Route segment
         val maxPts = minOf(pts.size, MapFrame.MAX_PTS)
         val pixelPts = ArrayList<Point>(maxPts)
-
         for (i in 0 until maxPts) {
             val dLat = pts[i].latitude - refLat
             val dLon = pts[i].longitude - refLon
             val dNorthM = dLat * metersPerDegLat
             val dEastM = dLon * metersPerDegLon
-
-            // Vehicle-relative: +x = east, -y = north (up on screen)
             val px = (dEastM * pxPerMeter).toInt().coerceIn(-260, 260)
             val py = (-dNorthM * pxPerMeter).toInt().coerceIn(-260, 260)
             pixelPts.add(Point(px, py))
+        }
+        segments.add(Segment(SegmentType.Route, 10, pixelPts))
+
+        // Nearby road segments (limit total frame size to MAX_FRAME=4096 bytes)
+        // Each segment = 3 header + pts*4 bytes. Budget: ~3000 B for roads
+        var totalSegs = 1
+        var budgetBytes = 3000
+        for (road in nearbyRoads) {
+            if (totalSegs >= MapFrame.MAX_SEGS || budgetBytes < 83) break  // 83 B = min segment (3 + 20*4)
+            val roadPts = road.points
+            if (roadPts.size < 2) continue
+            val maxRoadPts = minOf(roadPts.size, 20)
+            val rPts = ArrayList<Point>(maxRoadPts)
+            for (i in 0 until maxRoadPts) {
+                val dLat = roadPts[i].latitude - refLat
+                val dLon = roadPts[i].longitude - refLon
+                val dNorthM = dLat * metersPerDegLat
+                val dEastM = dLon * metersPerDegLon
+                val px = (dEastM * pxPerMeter).toInt().coerceIn(-260, 260)
+                val py = (-dNorthM * pxPerMeter).toInt().coerceIn(-260, 260)
+                rPts.add(Point(px, py))
+            }
+            if (rPts.size >= 2) {
+                log("osmAnd: road seg#${totalSegs} type=${road.roadType} pts=${rPts.size} px=(${rPts[0].x},${rPts[0].y})-(${rPts[rPts.size-1].x},${rPts[rPts.size-1].y})")
+                segments.add(Segment(SegmentType.Road, 3, rPts))
+                totalSegs++
+                budgetBytes -= (3 + rPts.size * 4)
+            }
         }
 
         return MapFrame(
             seq = seq,
             flags = MapFrame.FLAG_ROTATE or MapFrame.FLAG_VEHICLE,
-            headingDeg10 = headingDeg10,  // GPS bearing × 10
+            headingDeg10 = headingDeg10,  // bearing × 10
             scalePxPerMeter100 = scalePxPerMeter100,
-            segments = listOf(Segment(SegmentType.Route, 10, pixelPts)),
+            segments = segments,
         )
     }
 
@@ -299,7 +337,7 @@ class OsmAndNavSource(
         }
     }
 
-    /** Pull the active route geometry from OsmAnd. Called on connect + on recalculation. */
+    /** Pull the active route geometry from OsmAnd. Called on connect + on recalc + every tick. */
     private fun pullRouteGeometry() {
         val s = svc ?: return
         try {
@@ -308,20 +346,65 @@ class OsmAndNavSource(
             val result = ActiveRouteGeometry()
             val ok = s.getActiveRouteGeometry(params, result)
             if (ok && result.points.size >= 2) {
-                routePoints = result.points
-                routeVersion++
-                log("osmAnd: Route-Geometrie: ${result.points.size} Punkte, " +
-                    "${result.totalDistanceM} m total, ${result.remainingDistanceM} m rest")
+                val newVersion = result.routeVersion
+                if (newVersion != routeVersion || routePoints.isEmpty()) {
+                    routePoints = result.points
+                    routeVersion = newVersion
+                    log("osmAnd: Route-Geometrie: ${result.points.size} Punkte, " +
+                        "${result.totalDistanceM} m total, ${result.remainingDistanceM} m rest, v=$newVersion")
+                } else {
+                    // Same version but points may have shifted (vehicle moved)
+                    routePoints = result.points
+                    routeVersion = newVersion
+                }
             } else {
                 if (routePoints.isNotEmpty()) {
                     log("osmAnd: keine aktive Route (ok=$ok)")
+                    routePoints = emptyList()
                 }
-                // Keep old geometry if we had one; OsmAnd may recalculate shortly
             }
         } catch (e: RemoteException) {
             log("osmAnd: getActiveRouteGeometry fehlgeschlagen: $e")
         }
     }
+
+    /** Pull nearby roads from OsmAnd. Called every tick by refresh(). */
+    private fun pullNearbyRoads() {
+        val s = svc ?: run { log("osmAnd: nearby: svc null"); return }
+        val pts = routePoints
+        if (pts.isEmpty()) run { log("osmAnd: nearby: no route points"); return }
+
+        // Use the first route point (vehicle position) as center
+        val centerLat = pts[0].latitude
+        val centerLon = pts[0].longitude
+
+        try {
+            val params = net.osmand.aidlapi.map.NearbyRoadsParams()
+            params.setCenterLat(centerLat)
+            params.setCenterLon(centerLon)
+            params.setRadiusMeters(200)  // 500 m radius
+            params.setMaxRoads(20)
+            val result = net.osmand.aidlapi.map.NearbyRoadsResult()
+            val ok = s.getNearbyRoads(params, result)
+            log("osmAnd: nearby: ok=$ok roads=${result.roads.size} total=${result.totalFound}")
+            if (ok && result.roads.isNotEmpty()) {
+                nearbyRoads = result.roads
+                if (nearbyRoads.size != lastNearbyCount) {
+                    log("osmAnd: nearby roads: ${nearbyRoads.size} roads (total=${result.totalFound})")
+                    lastNearbyCount = nearbyRoads.size
+                }
+            } else {
+                nearbyRoads = emptyList()
+            }
+        } catch (e: RemoteException) {
+            log("osmAnd: nearby RemoteException: ${e.message}")
+        } catch (e: Exception) {
+            log("osmAnd: nearby error: ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    @Volatile private var lastNearbyCount: Int = -1
+    @Volatile private var nearbyPulling: Boolean = false
 
     /** Compute bearing (degrees, 0=north, clockwise) from a route polyline.
      *  Point[0] = vehicle position. We look a few points ahead (or up to ~50 m)

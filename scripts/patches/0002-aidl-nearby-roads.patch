@@ -1,24 +1,29 @@
-From 39f0c309dbcee60f07b43b222fb50b9fe2e4135d Mon Sep 17 00:00:00 2001
+From 2dcb073600010d98024b54ac93f3fa972748e9c8 Mon Sep 17 00:00:00 2001
 From: LibreMoto Build <libre-moto@jacksitlab.de>
-Date: Tue, 15 Sep 2026 06:57:36 +0000
+Date: Tue, 15 Sep 2026 14:31:54 +0000
 Subject: [PATCH] feat(aidl): expose nearby roads vector data via
  getNearbyRoads()
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
 
 Add AIDL V2 method getNearbyRoads(centerLat, centerLon, radiusM, maxRoads)
 that queries loaded .obf vector tiles for road polylines within a bbox.
 Returns List<ARoadPolyline> with WGS84 points, road name, and highway type.
-Uses BinaryMapIndexReader.searchMapIndex + LINE_RULES highway-tag filter.
+Uses getReverseGeocodingMapFiles() readers, checks highway tag on all
+objects (no LINE_RULES filter — REVERSE_GEOCODING readers set different
+objectType values).
 ---
- .../osmand/aidlapi/IOsmAndAidlInterface.aidl  | 14 ++-
- .../net/osmand/aidlapi/map/ARoadPolyline.aidl |  3 +
- .../net/osmand/aidlapi/map/ARoadPolyline.java | 58 ++++++++++++
- .../osmand/aidlapi/map/NearbyRoadsParams.aidl |  3 +
- .../osmand/aidlapi/map/NearbyRoadsParams.java | 64 +++++++++++++
- .../osmand/aidlapi/map/NearbyRoadsResult.aidl |  3 +
- .../osmand/aidlapi/map/NearbyRoadsResult.java | 53 +++++++++++
- OsmAnd/src/net/osmand/aidl/OsmandAidlApi.java | 90 +++++++++++++++++++
- .../net/osmand/aidl/OsmandAidlServiceV2.java  | 17 +++-
- 9 files changed, 303 insertions(+), 2 deletions(-)
+ .../osmand/aidlapi/IOsmAndAidlInterface.aidl  |   7 +
+ .../net/osmand/aidlapi/map/ARoadPolyline.aidl |   2 +
+ .../net/osmand/aidlapi/map/ARoadPolyline.java |  58 ++++++
+ .../osmand/aidlapi/map/NearbyRoadsParams.aidl |   2 +
+ .../osmand/aidlapi/map/NearbyRoadsParams.java |  64 +++++++
+ .../osmand/aidlapi/map/NearbyRoadsResult.aidl |   2 +
+ .../osmand/aidlapi/map/NearbyRoadsResult.java |  53 ++++++
+ OsmAnd/src/net/osmand/aidl/OsmandAidlApi.java | 172 +++++++++++++++++-
+ .../net/osmand/aidl/OsmandAidlServiceV2.java  |  14 ++
+ 9 files changed, 373 insertions(+), 1 deletion(-)
  create mode 100644 OsmAnd-api/src/net/osmand/aidlapi/map/ARoadPolyline.aidl
  create mode 100644 OsmAnd-api/src/net/osmand/aidlapi/map/ARoadPolyline.java
  create mode 100644 OsmAnd-api/src/net/osmand/aidlapi/map/NearbyRoadsParams.aidl
@@ -27,43 +32,36 @@ Uses BinaryMapIndexReader.searchMapIndex + LINE_RULES highway-tag filter.
  create mode 100644 OsmAnd-api/src/net/osmand/aidlapi/map/NearbyRoadsResult.java
 
 diff --git a/OsmAnd-api/src/net/osmand/aidlapi/IOsmAndAidlInterface.aidl b/OsmAnd-api/src/net/osmand/aidlapi/IOsmAndAidlInterface.aidl
-index 8da4a14712..4839bd3fbb 100644
+index 8da4a14712..ad236013fa 100644
 --- a/OsmAnd-api/src/net/osmand/aidlapi/IOsmAndAidlInterface.aidl
 +++ b/OsmAnd-api/src/net/osmand/aidlapi/IOsmAndAidlInterface.aidl
-@@ -1,6 +1,8 @@
- package net.osmand.aidlapi;
- 
- import net.osmand.aidlapi.map.ALatLon;
+@@ -102,6 +102,8 @@ import net.osmand.aidlapi.navigation.ActiveRouteGeometry;
+ import net.osmand.aidlapi.navigation.ARouteUpdateParams;
+ import net.osmand.aidlapi.navigation.ABlockedRoad;
+ import net.osmand.aidlapi.navigation.GetActiveRouteParams;
 +import net.osmand.aidlapi.map.NearbyRoadsParams;
 +import net.osmand.aidlapi.map.NearbyRoadsResult;
- import net.osmand.aidlapi.map.SetMapLocationParams;
- import net.osmand.aidlapi.map.SetLocationParams;
+ import net.osmand.aidlapi.navigation.AddBlockedRoadParams;
+ import net.osmand.aidlapi.navigation.RemoveBlockedRoadParams;
  
-@@ -982,4 +984,14 @@ interface IOsmAndAidlInterface {
+@@ -982,4 +984,9 @@ interface IOsmAndAidlInterface {
       * @param callbackId id returned by registerForRouteUpdates
       */
      boolean unregisterFromRouteUpdates(in long callbackId);
--}
-\ No newline at end of file
 +
 +    /**
 +     * Returns road polylines (WGS84) within a radius of the given center.
-+     * Useful for rendering nearby streets on an external display.
-+     *
-+     * @param params center lat/lon, radius in meters, max roads to return
-+     * @param result filled with road polylines on success
-+     * @return false if no map data loaded or no roads found
 +     */
 +    boolean getNearbyRoads(in NearbyRoadsParams params, out NearbyRoadsResult result);
-+}
+ }
+\ No newline at end of file
 diff --git a/OsmAnd-api/src/net/osmand/aidlapi/map/ARoadPolyline.aidl b/OsmAnd-api/src/net/osmand/aidlapi/map/ARoadPolyline.aidl
 new file mode 100644
-index 0000000000..f3f55a7788
+index 0000000000..1fe2d024d7
 --- /dev/null
 +++ b/OsmAnd-api/src/net/osmand/aidlapi/map/ARoadPolyline.aidl
-@@ -0,0 +1,3 @@
+@@ -0,0 +1,2 @@
 +package net.osmand.aidlapi.map;
-+
 +parcelable ARoadPolyline;
 diff --git a/OsmAnd-api/src/net/osmand/aidlapi/map/ARoadPolyline.java b/OsmAnd-api/src/net/osmand/aidlapi/map/ARoadPolyline.java
 new file mode 100644
@@ -131,12 +129,11 @@ index 0000000000..fb681e0b9b
 +}
 diff --git a/OsmAnd-api/src/net/osmand/aidlapi/map/NearbyRoadsParams.aidl b/OsmAnd-api/src/net/osmand/aidlapi/map/NearbyRoadsParams.aidl
 new file mode 100644
-index 0000000000..c4cc33e24b
+index 0000000000..3a285f6074
 --- /dev/null
 +++ b/OsmAnd-api/src/net/osmand/aidlapi/map/NearbyRoadsParams.aidl
-@@ -0,0 +1,3 @@
+@@ -0,0 +1,2 @@
 +package net.osmand.aidlapi.map;
-+
 +parcelable NearbyRoadsParams;
 diff --git a/OsmAnd-api/src/net/osmand/aidlapi/map/NearbyRoadsParams.java b/OsmAnd-api/src/net/osmand/aidlapi/map/NearbyRoadsParams.java
 new file mode 100644
@@ -210,12 +207,11 @@ index 0000000000..1eabe1ffb4
 +}
 diff --git a/OsmAnd-api/src/net/osmand/aidlapi/map/NearbyRoadsResult.aidl b/OsmAnd-api/src/net/osmand/aidlapi/map/NearbyRoadsResult.aidl
 new file mode 100644
-index 0000000000..510a1fb4f8
+index 0000000000..4e5a29b702
 --- /dev/null
 +++ b/OsmAnd-api/src/net/osmand/aidlapi/map/NearbyRoadsResult.aidl
-@@ -0,0 +1,3 @@
+@@ -0,0 +1,2 @@
 +package net.osmand.aidlapi.map;
-+
 +parcelable NearbyRoadsResult;
 diff --git a/OsmAnd-api/src/net/osmand/aidlapi/map/NearbyRoadsResult.java b/OsmAnd-api/src/net/osmand/aidlapi/map/NearbyRoadsResult.java
 new file mode 100644
@@ -277,120 +273,197 @@ index 0000000000..cbf4fee205
 +	}
 +}
 diff --git a/OsmAnd/src/net/osmand/aidl/OsmandAidlApi.java b/OsmAnd/src/net/osmand/aidl/OsmandAidlApi.java
-index 7e64736efa..6a0ccbf149 100644
+index 7e64736efa..bd83b49c68 100644
 --- a/OsmAnd/src/net/osmand/aidl/OsmandAidlApi.java
 +++ b/OsmAnd/src/net/osmand/aidl/OsmandAidlApi.java
-@@ -60,11 +60,18 @@ import net.osmand.aidlapi.navigation.ABlockedRoad;
+@@ -60,6 +60,20 @@ import net.osmand.aidlapi.navigation.ABlockedRoad;
  import net.osmand.aidlapi.navigation.ARouteUpdate;
  import net.osmand.aidlapi.navigation.ActiveRouteGeometry;
  import net.osmand.aidlapi.navigation.GetActiveRouteParams;
 +import net.osmand.aidlapi.map.NearbyRoadsParams;
 +import net.osmand.aidlapi.map.NearbyRoadsResult;
 +import net.osmand.aidlapi.map.ARoadPolyline;
++import net.osmand.binary.BinaryMapIndexReader;
++import net.osmand.binary.BinaryMapDataObject;
++import net.osmand.binary.BinaryMapRouteReaderAdapter.RouteRegion;
++import net.osmand.binary.BinaryMapRouteReaderAdapter.RouteSubregion;
++import net.osmand.binary.RouteDataObject;
++import net.osmand.binary.BinaryMapRouteReaderAdapter.RouteTypeRule;
++import net.osmand.ResultMatcher;
++import net.osmand.render.RenderingRulesStorage;
++import net.osmand.util.MapUtils;
++import gnu.trove.map.hash.TIntObjectHashMap;
++import gnu.trove.iterator.TIntObjectIterator;
  import net.osmand.aidlapi.navigation.NavigateGpxParams;
  import net.osmand.data.FavouritePoint;
  import net.osmand.data.LatLon;
- import net.osmand.data.PointDescription;
- import net.osmand.data.ValueHolder;
-+import net.osmand.binary.BinaryMapDataObject;
-+import net.osmand.binary.BinaryMapIndexReader;
-+import net.osmand.util.MapUtils;
-+import net.osmand.render.RenderingRulesStorage;
- import net.osmand.plus.AppInitializeListener;
- import net.osmand.plus.AppInitializer;
- import net.osmand.plus.OsmAndTaskManager;
-@@ -2261,6 +2268,89 @@ public class OsmandAidlApi {
+@@ -2261,7 +2275,163 @@ public class OsmandAidlApi {
  		}
  	}
  
-+
+-	public void registerForVoiceRouterMessages(long id) {
 +	public boolean getNearbyRoads(@NonNull NearbyRoadsParams params,
 +	                              @NonNull NearbyRoadsResult result) {
-+		double centerLat = params.getCenterLat();
-+		double centerLon = params.getCenterLon();
++		int maxRoadsRaw = params.getMaxRoads();
++		if (maxRoadsRaw <= 0) maxRoadsRaw = 50;
++		final int maxRoads = maxRoadsRaw;
 +		int radiusM = params.getRadiusMeters();
-+		int maxRoads = params.getMaxRoads();
-+		if (maxRoads <= 0) maxRoads = 50;
++		if (radiusM <= 0) radiusM = 200;
 +
-+		// Compute bbox in WGS84
-+		double latDelta = radiusM / 111320.0;
-+		double lonDelta = radiusM / (111320.0 * Math.cos(Math.toRadians(centerLat)));
-+		double southLat = centerLat - latDelta;
-+		double northLat = centerLat + latDelta;
-+		double westLon = centerLon - lonDelta;
-+		double eastLon = centerLon + lonDelta;
++		// Get the active navigation route from OsmAnd
++		java.util.List<net.osmand.Location> routeLocs = null;
++		try {
++			routeLocs = app.getRoutingHelper().getRoute().getRouteLocations();
++			LOG.info("getNearbyRoads: route points=" + (routeLocs != null ? routeLocs.size() : 0));
++		} catch (Exception e) {
++			LOG.info("getNearbyRoads: could not get route: " + e.getMessage());
++		}
++		if (routeLocs == null || routeLocs.isEmpty()) return false;
 +
-+		// Convert to 31-bit tile coordinates
-+		int leftX = MapUtils.get31TileNumberX(westLon);
-+		int rightX = MapUtils.get31TileNumberX(eastLon);
-+		int topY = MapUtils.get31TileNumberY(northLat);
-+		int bottomY = MapUtils.get31TileNumberY(southLat);
-+		int zoom = 15;
++		// Limit route to first ~2km from vehicle (point 0) to keep bbox small
++		double minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
++		double routeDistM = 0;
++		int routeEnd = routeLocs.size();
++		for (int ri = 0; ri < routeLocs.size(); ri++) {
++			net.osmand.Location loc = routeLocs.get(ri);
++			if (ri > 0) {
++				routeDistM += loc.distanceTo(routeLocs.get(ri - 1));
++				if (routeDistM > 2000) { routeEnd = ri + 1; break; }
++			}
++			if (loc.getLatitude() < minLat) minLat = loc.getLatitude();
++			if (loc.getLatitude() > maxLat) maxLat = loc.getLatitude();
++			if (loc.getLongitude() < minLon) minLon = loc.getLongitude();
++			if (loc.getLongitude() > maxLon) maxLon = loc.getLongitude();
++		}
++		LOG.info("getNearbyRoads: route limited to " + routeEnd + "/" + routeLocs.size() + " pts (" + (int)routeDistM + "m)");
++		final int routeEndFinal = routeEnd;
++		double latPad = radiusM / 111320.0;
++		double lonPad = radiusM / (111320.0 * Math.cos(Math.toRadians((minLat + maxLat) / 2)));
++		int leftX = MapUtils.get31TileNumberX(minLon - lonPad);
++		int rightX = MapUtils.get31TileNumberX(maxLon + lonPad);
++		int topY = MapUtils.get31TileNumberY(maxLat + latPad);
++		int bottomY = MapUtils.get31TileNumberY(minLat - latPad);
++		int zoom = 17;
++		try {
++			zoom = app.getOsmandMap().getMapView().getZoom();
++		} catch (Exception e) { }
++		LOG.info("getNearbyRoads: route bbox lat[" + minLat + "," + maxLat + "] lon[" + minLon + "," + maxLon + "] zoom=" + zoom + " routePts=" + routeEndFinal);
 +
 +		java.util.List<ARoadPolyline> roads = new java.util.ArrayList<>();
-+		int totalFound = 0;
-+
++		int[] totalFound = {0};
 +		java.util.Collection<net.osmand.plus.resources.BinaryMapReaderResource> fileReaders =
 +				app.getResourceManager().getFileReaders();
-+		if (fileReaders.isEmpty()) {
-+			return false;
++		if (fileReaders.isEmpty()) return false;
++		BinaryMapIndexReader.SearchRequest<BinaryMapDataObject> searchRequest =
++				BinaryMapIndexReader.buildSearchRequest(leftX, rightX, topY, bottomY, zoom, null);
++
++		// Build route point array in 31-bit coords for proximity check (limited route)
++		int[] routeX = new int[routeEndFinal];
++		int[] routeY = new int[routeEndFinal];
++		for (int i = 0; i < routeEndFinal; i++) {
++			routeX[i] = MapUtils.get31TileNumberX(routeLocs.get(i).getLongitude());
++			routeY[i] = MapUtils.get31TileNumberY(routeLocs.get(i).getLatitude());
 +		}
++		// Proximity threshold in 31-bit tile units (~50m)
++		double proximityMeters = 50;
++		double tileWidthM = MapUtils.getTileDistanceWidth(zoom);
++		// 31-bit tile: 2^31 tiles across 360 degrees at zoom 0, so 1 tile unit ≈ 360/2^31 degrees
++		// At zoom Z, tile width = 360/2^Z degrees = 360*111320/2^Z meters
++		// 31-bit unit = (360*111320) / (2^31 * 2^Z) ... no, 31-bit is the FULL resolution
++		// 1 unit in 31-bit ≈ 0.0084 m at equator (360*111320 / 2^31 ≈ 0.0084 m)
++		double unitMeters = 40075000.0 / (1L << 31); // circumference / 2^31
++		double proximityUnits = proximityMeters / unitMeters;
++		double proximityUnitsSq = proximityUnits * proximityUnits;
 +
 +		try {
 +			for (net.osmand.plus.resources.BinaryMapReaderResource resource : fileReaders) {
-+				BinaryMapIndexReader reader = resource.getReader(
-+						net.osmand.plus.resources.ResourceManager.BinaryMapReaderResourceType.REVERSE_GEOCODING);
++				BinaryMapIndexReader reader = resource.getReader(net.osmand.plus.resources.ResourceManager.BinaryMapReaderResourceType.ROUTING);
++				if (reader == null) reader = resource.getShallowReader();
 +				if (reader == null) continue;
++				for (RouteRegion reg : reader.getRoutingIndexes()) {
++					List<RouteSubregion> parent = zoom < 15 ? reg.getBaseSubregions() : reg.getSubregions();
++					List<RouteSubregion> searchResult = reader.searchRouteIndexTree(searchRequest, parent);
++					reader.loadRouteIndexData(searchResult, new ResultMatcher<RouteDataObject>() {
++						@Override
++						public boolean publish(RouteDataObject r) {
++							String highway = "";
++							int[] roTypes = r.getTypes();
++							for (int k = 0; k < roTypes.length; k++) {
++								RouteTypeRule rr = reg.quickGetEncodingRule(roTypes[k]);
++								if (rr != null && "highway".equals(rr.getTag())) {
++									highway = rr.getValue();
++									break;
++								}
++							}
++							if (highway.isEmpty()) return false;
++							// Skip non-vehicular ways
++							if (highway.equals("footway") || highway.equals("path") || highway.equals("cycleway")
++									|| highway.equals("steps") || highway.equals("pedestrian")
++									|| highway.equals("track") || highway.equals("bridleway"))
++								return false;
 +
-+				BinaryMapIndexReader.SearchRequest<BinaryMapDataObject> request =
-+						BinaryMapIndexReader.buildSearchRequest(leftX, rightX, topY, bottomY, zoom, null);
-+				java.util.List<BinaryMapDataObject> objects = reader.searchMapIndex(request);
++							// Check if any road point is within proximityUnits of the route
++							int npts = r.getPointsLength();
++							boolean nearRoute = false;
++							for (int j = 0; j < npts && !nearRoute; j++) {
++								int rx = r.getPoint31XTile(j);
++								int ry = r.getPoint31YTile(j);
++								for (int i = 0; i < routeX.length && !nearRoute; i++) {
++									double dx = rx - routeX[i];
++									double dy = ry - routeY[i];
++									if (dx * dx + dy * dy < proximityUnitsSq) {
++										nearRoute = true;
++									}
++								}
++							}
++							if (!nearRoute) return false;
 +
-+				for (BinaryMapDataObject obj : objects) {
-+					if (obj.getObjectType() != RenderingRulesStorage.LINE_RULES) continue;
-+					String highway = obj.getTagValue("highway");
-+					if (highway == null) continue;
++							totalFound[0]++;
++							if (roads.size() >= maxRoads) return false;
 +
-+					totalFound++;
-+					if (roads.size() >= maxRoads) continue;
-+
-+					int[] coords = obj.getCoordinates();
-+				int npts = obj.getPointsLength();
-+				java.util.ArrayList<net.osmand.aidlapi.map.ALatLon> pts = new java.util.ArrayList<>(npts);
-+				for (int i = 0; i < npts; i++) {
-+					int x = coords[i * 2];
-+					int y = coords[i * 2 + 1];
-+					pts.add(new net.osmand.aidlapi.map.ALatLon(
-+							MapUtils.get31LatitudeY(y), MapUtils.get31LongitudeX(x)));
++							java.util.ArrayList<net.osmand.aidlapi.map.ALatLon> pts = new java.util.ArrayList<>(npts);
++							for (int j = 0; j < npts; j++) {
++								pts.add(new net.osmand.aidlapi.map.ALatLon(
++										MapUtils.get31LatitudeY(r.getPoint31YTile(j)),
++										MapUtils.get31LongitudeX(r.getPoint31XTile(j))));
++							}
++							ARoadPolyline road = new ARoadPolyline();
++							road.setPoints(pts);
++							String name = "";
++							TIntObjectHashMap<String> names = r.getNames();
++							if (names != null && !names.isEmpty()) {
++								TIntObjectIterator<String> it = names.iterator();
++								if (it.hasNext()) { it.advance(); name = it.value(); }
++							}
++							road.setName(name);
++							road.setRoadType(highway);
++							roads.add(road);
++							return false;
++						}
++						@Override
++						public boolean isCancelled() {
++							return false;
++						}
++					});
 +				}
-+
-+				ARoadPolyline road = new ARoadPolyline();
-+				road.setPoints(pts);
-+				road.setName(obj.getName() != null ? obj.getName() : "");
-+				road.setRoadType(highway);
-+				roads.add(road);
-+			}
-+				reader.close();
 +			}
 +		} catch (java.io.IOException e) {
-+			LOG.error("getNearbyRoads: " + e.getMessage(), e);
++			LOG.error("getNearbyRoads error", e);
 +			return false;
 +		}
-+
-+		if (roads.isEmpty()) {
-+			return false;
-+		}
-+
++		LOG.info("getNearbyRoads: totalFound=" + totalFound[0] + " roads.size=" + roads.size());
++		if (roads.isEmpty()) return false;
 +		result.setRoads(roads);
-+		result.setTotalFound(totalFound);
++		result.setTotalFound(totalFound[0]);
 +		return true;
 +	}
 +
- 	public void registerForVoiceRouterMessages(long id) {
++			public void registerForVoiceRouterMessages(long id) {
  		VoiceRouter.VoiceMessageListener listener = (cmds, played) -> {
  			if (aidlCallbackListener != null) {
+ 				for (OsmandAidlService.AidlCallbackParams cb : aidlCallbackListener.getAidlCallbacks().values()) {
 diff --git a/OsmAnd/src/net/osmand/aidl/OsmandAidlServiceV2.java b/OsmAnd/src/net/osmand/aidl/OsmandAidlServiceV2.java
-index 58b59ff738..85e805f45a 100644
+index 58b59ff738..17933e3caf 100644
 --- a/OsmAnd/src/net/osmand/aidl/OsmandAidlServiceV2.java
 +++ b/OsmAnd/src/net/osmand/aidl/OsmandAidlServiceV2.java
 @@ -101,6 +101,8 @@ import net.osmand.aidlapi.navigation.AddBlockedRoadParams;
@@ -402,33 +475,25 @@ index 58b59ff738..85e805f45a 100644
  import net.osmand.aidlapi.navigation.MuteNavigationParams;
  import net.osmand.aidlapi.navigation.NavigateGpxParams;
  import net.osmand.aidlapi.navigation.NavigateParams;
-@@ -1632,6 +1634,19 @@ public class OsmandAidlServiceV2 extends Service implements AidlCallbackListener
+@@ -1632,6 +1634,18 @@ public class OsmandAidlServiceV2 extends Service implements AidlCallbackListener
  				return false;
  			}
  		}
 +
-+	@Override
-+	public boolean getNearbyRoads(NearbyRoadsParams params, NearbyRoadsResult result) {
-+		try {
-+			OsmandAidlApi api = getApi("getNearbyRoads");
-+			return params != null && result != null && api != null
-+					&& api.getNearbyRoads(params, result);
-+		} catch (Exception e) {
-+			handleException(e);
-+			return false;
++		@Override
++		public boolean getNearbyRoads(NearbyRoadsParams params, NearbyRoadsResult result) {
++			try {
++				OsmandAidlApi api = getApi("getNearbyRoads");
++				return params != null && result != null && api != null
++						&& api.getNearbyRoads(params, result);
++			} catch (Exception e) {
++				handleException(e);
++				return false;
++			}
 +		}
-+	}
-+
  	};
  
  	private void setCustomization(OsmandAidlApi api, CustomizationInfoParams params) {
-@@ -1734,4 +1749,4 @@ public class OsmandAidlServiceV2 extends Service implements AidlCallbackListener
- 			this.key = key;
- 		}
- 	}
--}
-\ No newline at end of file
-+}
 -- 
 2.47.3
 

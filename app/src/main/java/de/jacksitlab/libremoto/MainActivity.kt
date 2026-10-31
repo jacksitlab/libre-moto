@@ -139,10 +139,19 @@ class MainActivity : AppCompatActivity() {
         ble.sendNavData(json)
         lastPayload.text = json
         if (cbMap.isChecked) {
-            val f = source.mapFrame(nextSeq())
-            val b = f.encode()
-            ble.sendMap(b)
-            log("Map: ${b.size} B, ${f.segments.size} Seg.")
+            try {
+                val f = source.mapFrame(nextSeq())
+                val b = f.encode()
+                ble.sendMap(b)
+                if (f.segments.size > 1 || (System.currentTimeMillis() / 5000) % 2 == 0L) {
+                    log("Map: ${b.size} B, ${f.segments.size} Seg.")
+                }
+            } catch (e: IllegalArgumentException) {
+                log("Map: frame skipped (${e.message})")
+                seq = (seq + 1) % 256
+            } catch (e: Exception) {
+                log("Map: error ${e.message}")
+            }
         }
     }
 
@@ -153,17 +162,17 @@ class MainActivity : AppCompatActivity() {
         if (!ble.isReady) { log("erst verbinden"); updateBleStatus(); return }
         streaming = true
         streamBtn.text = "Stream ⏸"
-        log("Stream startet (1 Hz)…")
-        fun pump() {
-            if (!streaming) return
-            sendOnce()
-            streamTimer.postDelayed({ pump() }, 1000)
-        }
-        pump()
+        log("Stream startet (1 Hz via Foreground Service)…")
+        // Hand over streaming entirely to the foreground service.
+        // The service runs its own pump loop — the activity does NOT pump.
+        // This keeps the stream alive even when the app is backgrounded.
+        StreamService.start(this, ble, source, cbMap.isChecked)
+        StreamService.seq = seq
     }
 
     private fun stopStream() {
         streaming = false
+        StreamService.stop(this)
         if (::streamBtn.isInitialized) streamBtn.text = "Stream ✕"
     }
 
