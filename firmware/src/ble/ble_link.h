@@ -30,6 +30,7 @@
 #include "BLEDevice.h"   /* ESP32 BLE server + transitively FreeRTOS primitives */
 
 #include "../libre-moto/config.h"      /* BLE_NAME */
+#include "map_reassembly.h"            /* host-testable chunk reassembly */
 
 /* --- UUIDs (protocol.md §1, provisional fixed set) ---------- */
 #define SVC_UUID     "6F1C4D52-5B66-4A3E-9C8A-3D2E7F1A4401"
@@ -72,10 +73,12 @@ uint16_t      g_ctrl_head = 0;
 uint16_t      g_ctrl_tail = 0;
 uint16_t      g_ctrl_free;
 
-/* --- MapData reassembly (protocol.md §4) ---------------------- */
-uint8_t       g_map_buf[MAP_FRAME_MAX];
-size_t        g_map_len = 0;
-uint32_t      g_map_last_chunk_ms = 0;
+/* --- MapData reassembly (protocol.md §4) ----------------------
+ * Host-testable state machine lives in map_reassembly.h; this struct is
+ * guarded by g_q_mux exactly like the queues above. */
+struct MapReasm g_map_reasm;
+/* Staging buffer for complete frames handed to on_map_frame from poll. */
+uint8_t       g_map_out_buf[MAP_REASM_MAX_FRAME];
 
 /* --- Status payload (for Read + Notify) ----------------------- */
 char          g_status_json[160];
@@ -126,22 +129,19 @@ void queue_ctrl(const uint8_t *data, size_t len) {
 }
 
 void map_feed(const uint8_t *data, size_t len) {
-  /* Append a 512-B chunk; enforce the 4 KB frame ceiling. */
+  /* Append a chunk; the reassembly state machine (map_reassembly.h)
+   * closes the in-flight frame when a chunk starts a new one (magic
+   * 4C 4D 01) and enforces the 4 KB ceiling. Deterministic boundary —
+   * the 500 ms gap is only the fallback for the last frame of a burst. */
   NAV_PUSH_LOCK();
-  if (g_map_len + len <= MAP_FRAME_MAX) {
-    memcpy(g_map_buf + g_map_len, data, len);
-    g_map_len += len;
-  } else {
-    /* Oversized → keep nothing (drop on next timeout). */
-    if (g_map_len > 0) g_map_len = 0;   /* will be handled as drop in poll */
-  }
-  g_map_last_chunk_ms = millis();
+  map_reasm_feed(&g_map_reasm, data, len);
+  g_map_reasm.last_chunk_ms = millis();
   NAV_UNLOCK();
 }
 
 void map_reset() {
   NAV_PUSH_LOCK();
-  g_map_len = 0;
+  map_reasm_reset(&g_map_reasm);
   NAV_UNLOCK();
 }
 
@@ -286,23 +286,13 @@ void ble_link_poll() {
     }
   }
 
-  /* 3. MapData reassembly + 500 ms timeout (spec §4/§6). */
+  /* 3. MapData reassembly (spec §4/§6): deterministic boundary via the
+   * frame magic, 500 ms gap only as the fallback for a burst's last frame. */
   {
-    bool has = false;
     NAV_PUSH_LOCK();
-    has = (g_map_len > 0);
-    uint32_t last = g_map_last_chunk_ms;
+    size_t out_len = map_reasm_poll(&g_map_reasm, g_map_out_buf, millis(), MAP_CHUNK_TIMEOUT_MS);
     NAV_UNLOCK();
-    if (has && (millis() - last) > MAP_CHUNK_TIMEOUT_MS) {
-      /* Frame closed (complete or timed-out partial). */
-      size_t len = g_map_len;
-      uint8_t *frame = nullptr;
-      NAV_PUSH_LOCK();
-      frame = g_map_buf;
-      g_map_len = 0;
-      NAV_UNLOCK();
-      if (g_cb.on_map_frame) g_cb.on_map_frame(frame, len);
-    }
+    if (out_len > 0 && g_cb.on_map_frame) g_cb.on_map_frame(g_map_out_buf, out_len);
   }
 
   /* 4. Advertising state machine (disconnect → 3 s jitter → restart). */

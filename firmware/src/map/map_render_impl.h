@@ -38,7 +38,11 @@ extern "C" bool prepare_map_frame(const struct MapFrame *fr,
 
   int used = 0;
 
-  /* pool budget: 1 slot per route/destination, 2 per road/branch */
+  /* pool budget: 2 slots per road/branch (casing + fill), 1 per route/
+     destination. Roads are prepared as CENTRE lines with a width — the
+     renderer draws casing+fill in two passes (all casings below all
+     fills), so crossing streets merge seamlessly instead of drawing
+     a white cross of edge lines through each other. */
   int n_route = 0;
   for (int si = 0; si < fr->seg_count; si++)
     if (fr->segs[si].type == MAP_SEG_ROUTE) n_route++;
@@ -47,62 +51,47 @@ extern "C" bool prepare_map_frame(const struct MapFrame *fr,
   int road_room = (MAP_POOL - route_room) / 2;
   if (road_room < 0) road_room = 0;
 
-  /* base[0] = rotated centre points, base[1] = offset edge points.
+  /* base[0] = rotated centre points (roads are centre lines now).
      File-local static: only the comm thread calls this, so no race.
-     ~3.8 KB in .bss, off the task stack. */
-  static double base[2][MAP_MAX_PTS * 2];
-  int road_i = 0;
+     ~1.9 KB in .bss, off the task stack. */
+  static double base[MAP_MAX_PTS * 2];
 
-  /* ---- pass 1a: roads / branches → 2 thin edge lines each ---------- */
-  for (int si = 0; si < fr->seg_count; si++) {
-    const struct MapSeg *sg = &fr->segs[si];
-    if (sg->type != MAP_SEG_ROAD && sg->type != MAP_SEG_BRANCH) continue;
-    if (road_i >= road_room) continue;         /* pool exhausted — skip */
-    road_i++;
+  /* ---- pass 1a: roads / branches → casing + fill centre lines -------
+   *  TWO loops so the drawn order is: ALL casings, then ALL fills.
+   *  (If casing+fill were interleaved per road, a later road's casing
+   *  would stripe across an earlier road's fill at crossings — the
+   *  exact artefact the two-pass scheme exists to avoid.) */
+  for (int pass = 0; pass < 2; pass++) {
+    int road_i = 0;
+    for (int si = 0; si < fr->seg_count; si++) {
+      const struct MapSeg *sg = &fr->segs[si];
+      if (sg->type != MAP_SEG_ROAD && sg->type != MAP_SEG_BRANCH) continue;
+      if (road_i >= road_room) continue;         /* pool exhausted — skip */
+      road_i++;
+      if (used >= MAP_POOL - 2 - n_route) break;
 
-    int n = sg->npts;
-    for (int i = 0; i < n; i++) {
-      double x = sg->points[i * 2 + 0];
-      double y = sg->points[i * 2 + 1];
-      base[0][i * 2 + 0] =  x * ct + y * st + MAP_CX;
-      base[0][i * 2 + 1] = -x * st + y * ct + MAP_CY;
-    }
-
-    double half = sg->width * 0.5;
-    if (half < 1.5) half = 1.5;
-
-    for (int e = 0; e < 2 && used < MAP_POOL - 2 - n_route; e++) {
-      double sign = (e == 0) ? 1.0 : -1.0;
-      /* per-vertex offset along the average of neighbouring normals so
-         corners don't spike */
+      int n = sg->npts;
       for (int i = 0; i < n; i++) {
-        double x = base[0][i * 2], y = base[0][i * 2 + 1];
-        double nx = 0, ny = 0;
-        if (n > 1) {
-          if (i < n - 1) {
-            double dx = base[0][(i + 1) * 2] - x, dy = base[0][(i + 1) * 2 + 1] - y;
-            double L = sqrt(dx * dx + dy * dy);
-            if (L > 0.0001) { nx += -dy / L; ny += dx / L; }
-          }
-          if (i > 0) {
-            double dx = x - base[0][(i - 1) * 2], dy = y - base[0][(i - 1) * 2 + 1];
-            double L = sqrt(dx * dx + dy * dy);
-            if (L > 0.0001) { nx += -dy / L; ny += dx / L; }
-          }
-        }
-        double L = sqrt(nx * nx + ny * ny);
-        if (L < 0.0001) { nx = 0; ny = 1; } else { nx /= L; ny /= L; }
-        double off = half * sign;
-        base[1][i * 2 + 0] = x + nx * off;
-        base[1][i * 2 + 1] = y + ny * off;
+        double x = sg->points[i * 2 + 0];
+        double y = sg->points[i * 2 + 1];
+        base[i * 2 + 0] =  x * ct + y * st + MAP_CX;
+        base[i * 2 + 1] = -x * st + y * ct + MAP_CY;
       }
+
+      /* fill width: the segment width byte is the road's fill width;
+         casing = fill + 2 px so a dark outline stays visible around
+         every road. Width floor 3 keeps the road body readable. */
+      int fill_w = sg->width;
+      if (fill_w < 3) fill_w = 3;
+
       struct MapRenderLine *ln = &out->lines[used];
       ln->type  = sg->type;
-      ln->width = sg->width;
+      ln->casing = (pass == 0);
+      ln->width = (pass == 0) ? fill_w + 2 : fill_w;
       ln->npts  = n;
       for (int i = 0; i < n; i++) {
-        ln->pts[i * 2 + 0] = (int32_t)lrint(base[1][i * 2 + 0]);
-        ln->pts[i * 2 + 1] = (int32_t)lrint(base[1][i * 2 + 1]);
+        ln->pts[i * 2 + 0] = (int32_t)lrint(base[i * 2 + 0]);
+        ln->pts[i * 2 + 1] = (int32_t)lrint(base[i * 2 + 1]);
       }
       used++;
     }
@@ -115,6 +104,7 @@ extern "C" bool prepare_map_frame(const struct MapFrame *fr,
     struct MapRenderLine *ln = &out->lines[used];
     ln->type  = sg->type;
     ln->width = sg->width;
+    ln->casing = false;
     ln->npts  = sg->npts;
     for (int i = 0; i < sg->npts; i++) {
       double x = sg->points[i * 2 + 0];
@@ -125,13 +115,14 @@ extern "C" bool prepare_map_frame(const struct MapFrame *fr,
     used++;
   }
 
-  /* ---- pass 2: route (topmost, fat white, rounded) ----------------- */
+  /* ---- pass 2: route (topmost, fat, rounded) ----------------------- */
   for (int si = 0; si < fr->seg_count && used < MAP_POOL; si++) {
     const struct MapSeg *sg = &fr->segs[si];
     if (sg->type != MAP_SEG_ROUTE) continue;
     struct MapRenderLine *ln = &out->lines[used];
     ln->type  = sg->type;
     ln->width = sg->width;
+    ln->casing = false;
     ln->npts  = sg->npts;
     for (int i = 0; i < sg->npts; i++) {
       double x = sg->points[i * 2 + 0];

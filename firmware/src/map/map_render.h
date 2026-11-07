@@ -36,19 +36,24 @@ extern "C" {
 #endif
 
 /* Segment pool size: how many LVGL lines the map screen can show at once.
- * (Lives here so the geometry and the renderer agree.) */
-#define MAP_POOL 30
+ * (Lives here so the geometry and the renderer agree.)
+ * 44 = 20 roads × (casing+fill two-pass) + route + destination + margin. */
+#define MAP_POOL 44
 
-/* Screen centre (the world origin maps here). 480×480 panel → 240,240. */
+/* Screen position of the VEHICLE (the world origin maps here).
+ * 480×480 panel: vehicle at ONE THIRD from the bottom (Beeline-style
+ * look-ahead layout) → x=240, y=320. Two thirds of the display show
+ * the road ahead, one third the road behind. */
 #define MAP_CX 240.0
-#define MAP_CY 240.0
+#define MAP_CY 320.0
 
 /* One prepared line: screen-space points + the segment kind/width the
  * renderer needs to pick style (road/branch = thin white edge, destination
  * = accent, route = fat white). */
 struct MapRenderLine {
   int      type;   /* MAP_SEG_* (drives colour + effective width) */
-  int      width;  /* original segment width px (used for the route) */
+  int      width;  /* line width px (casing = fill width + 2) */
+  bool     casing; /* true = road casing pass (drawn under all fills) */
   int      npts;   /* number of points */
   int32_t  pts[MAP_MAX_PTS * 2]; /* x0 y0 x1 y1 ... screen coords */
 };

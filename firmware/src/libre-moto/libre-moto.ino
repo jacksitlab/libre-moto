@@ -46,8 +46,10 @@ static lv_obj_t *nav_text = NULL;    // road name
 static lv_obj_t *nav_status = NULL;  // "Link lost" / "Arrived" / ""
 
 static lv_obj_t *map_screen = NULL;
-/* segment pool: up to MAP_MAX_SEGS lines, created once, refilled per frame */
-#define MAP_POOL      30
+/* segment pool: MAP_POOL lines, created once, refilled per frame.
+   44 = 20 roads × (casing+fill) + route + destination + margin — the
+   ESP32 line budget for the two-pass casing+fill render. */
+#define MAP_POOL      44
 static lv_obj_t *map_lines[MAP_POOL];
 static lv_obj_t *map_vehicle = NULL;   /* triangle: heading arrow (fixed) or marker (rotating) */
 static lv_obj_t *map_marker = NULL;    /* destination marker (rotating frame) */
@@ -385,13 +387,14 @@ static void create_map_screen(void) {
 
   /* ---- vehicle marker: white arrowhead "^" (chevron), tip pointing up ---- */
   map_vehicle = lv_line_create(map_screen);
-  /* tip (240,212), wings (220,246) (260,246) — a bold "^" chevron.
+  /* tip (240,292), wings (220,326) (260,326) — a bold "^" chevron at the
+     VEHICLE position (MAP_CX/MAP_CY = 240/320, one third from the bottom).
      Points MUST live in a static buffer: lv_line keeps only the pointer
      and the array must outlive this function (stack would dangle). */
   static lv_point_precise_t vehicle_pts[3];
-  vehicle_pts[0].x = 220; vehicle_pts[0].y = 246;
-  vehicle_pts[1].x = 240; vehicle_pts[1].y = 212;
-  vehicle_pts[2].x = 260; vehicle_pts[2].y = 246;
+  vehicle_pts[0].x = 220; vehicle_pts[0].y = 326;
+  vehicle_pts[1].x = 240; vehicle_pts[1].y = 292;
+  vehicle_pts[2].x = 260; vehicle_pts[2].y = 326;
   lv_line_set_points(map_vehicle, vehicle_pts, 3);
   lv_obj_set_size(map_vehicle, 480, 480);   /* screen-absolute points */
   lv_obj_align(map_vehicle, LV_ALIGN_TOP_LEFT, 0, 0);
@@ -656,11 +659,17 @@ static lv_point_precise_t map_pts[MAP_POOL][MAP_MAX_PTS];
 
 /* Blit a PREPARED frame into the LVGL line pool (DISPLAY thread only).
    Reads a published MapRenderFrame snapshot — no geometry math here.
-   Z-order = creation order (LVGL 9): roads first, route last (top).
+   Z-order = creation order (LVGL 9): ALL road casings first, then ALL
+   road fills, then destination, route last (top) — the classic two-pass
+   casing+fill scheme (OSM-Carto/Mapnik style). Overlapping streets merge
+   into one white band first; the dark fills on top leave white visible
+   only where no street covers — "black line with white border", and
+   crossings join seamlessly without any geometry union.
    Style per line type:
-     road/branch  → thin (2 px) bright white edge line
-     destination  → 4 px accent
-     route        → fat white, rounded ("filled" look) */
+     road/branch casing → fill width + 2 px, WHITE (the border)
+     road/branch fill   → fill width px, C_BG (the black body)
+     destination        → 4 px accent
+     route              → fat white, rounded (high contrast on black roads) */
 static void render_map_display(const MapRenderFrame *rf) {
   for (int i = 0; i < rf->line_count && i < MAP_POOL; i++) {
     const MapRenderLine *ln = &rf->lines[i];
@@ -673,14 +682,19 @@ static void render_map_display(const MapRenderFrame *rf) {
     lv_obj_set_size(line, 480, 480);   /* points line-local → anchor at (0,0) */
     lv_obj_align(line, LV_ALIGN_TOP_LEFT, 0, 0);
     if (ln->type == MAP_SEG_ROAD || ln->type == MAP_SEG_BRANCH) {
-      lv_obj_set_style_line_width(line, 2, 0);          /* thin edge */
-      lv_obj_set_style_line_color(line, C_TEXT, 0);     /* bright white */
+      if (ln->casing) {
+        lv_obj_set_style_line_width(line, ln->width, 0);
+        lv_obj_set_style_line_color(line, C_TEXT, 0);    /* white border  */
+      } else {
+        lv_obj_set_style_line_width(line, ln->width, 0);
+        lv_obj_set_style_line_color(line, C_BG, 0);      /* black body    */
+      }
     } else if (ln->type == MAP_SEG_DESTINATION) {
       lv_obj_set_style_line_width(line, 4, 0);
       lv_obj_set_style_line_color(line, C_ACCENT, 0);
     } else { /* MAP_SEG_ROUTE */
-      lv_obj_set_style_line_width(line, ln->width, 0);  /* fat filled look */
-      lv_obj_set_style_line_color(line, C_TEXT, 0);     /* white          */
+      lv_obj_set_style_line_width(line, ln->width, 0);   /* fat filled look */
+      lv_obj_set_style_line_color(line, C_TEXT, 0);      /* white on black roads */
     }
     lv_obj_set_style_line_rounded(line, true, 0);
     lv_obj_remove_flag(line, LV_OBJ_FLAG_HIDDEN);

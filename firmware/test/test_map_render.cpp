@@ -72,28 +72,31 @@ int main() {
     CHECK(rf.show_vehicle, "vehicle flag");
     CHECK(rf.show_scale, "scale flag");
     CHECK(rf.scale_meters == 500, "scale 20 → 500 m");
-    CHECK(rf.line_count == 3, "1 road → 2 edge lines + 1 route = 3");
+    CHECK(rf.line_count == 3, "1 road → casing + fill + 1 route = 3");
 
-    /* road edges: centre line y=240, half=6 → edges at y=246 (e=0, +n)
-       and y=234 (e=1, −n). Normal of a horizontal line is (0,±1). */
+    /* road as CENTRE line y=240: casing (line0) and fill (line1) share the
+       same points; casing width = fill+2. */
     CHECK(rf.lines[0].type == MAP_SEG_ROAD, "line0 is road");
     CHECK(rf.lines[0].npts == 2, "line0 has 2 pts");
-    CHECK(near32(rf.lines[0].pts[0], 140, 1) && near32(rf.lines[0].pts[1], 246, 1),
-          "road edge A start (140,246)");
-    CHECK(near32(rf.lines[0].pts[2], 340, 1) && near32(rf.lines[0].pts[3], 246, 1),
-          "road edge A end (340,246)");
-    CHECK(near32(rf.lines[1].pts[0], 140, 1) && near32(rf.lines[1].pts[1], 234, 1),
-          "road edge B start (140,234)");
-    CHECK(near32(rf.lines[1].pts[2], 340, 1) && near32(rf.lines[1].pts[3], 234, 1),
-          "road edge B end (340,234)");
+    CHECK(rf.lines[0].casing, "line0 is the casing");
+    CHECK(rf.lines[0].width == rf.lines[1].width + 2, "casing = fill + 2");
+    CHECK(!rf.lines[1].casing, "line1 is the fill");
+    CHECK(near32(rf.lines[0].pts[0], 140, 1) && near32(rf.lines[0].pts[1], 320, 1),
+          "road casing start (140,320)");
+    CHECK(near32(rf.lines[0].pts[2], 340, 1) && near32(rf.lines[0].pts[3], 320, 1),
+          "road casing end (340,320)");
+    CHECK(near32(rf.lines[1].pts[0], 140, 1) && near32(rf.lines[1].pts[1], 320, 1),
+          "road fill start (140,320)");
+    CHECK(near32(rf.lines[1].pts[2], 340, 1) && near32(rf.lines[1].pts[3], 320, 1),
+          "road fill end (340,320)");
 
-    /* route: x=240, y from 240 up to 40 */
+    /* route: x=240, y from 320 (vehicle) up to 120 */
     CHECK(rf.lines[2].type == MAP_SEG_ROUTE, "line2 is route");
     CHECK(rf.lines[2].width == 10, "route width kept");
-    CHECK(near32(rf.lines[2].pts[0], 240, 1) && near32(rf.lines[2].pts[1], 240, 1),
-          "route start at centre");
-    CHECK(near32(rf.lines[2].pts[4], 240, 1) && near32(rf.lines[2].pts[5], 40, 1),
-          "route end (240,40)");
+    CHECK(near32(rf.lines[2].pts[0], 240, 1) && near32(rf.lines[2].pts[1], 320, 1),
+          "route start at vehicle (240,320)");
+    CHECK(near32(rf.lines[2].pts[4], 240, 1) && near32(rf.lines[2].pts[5], 120, 1),
+          "route end (240,120)");
 
     CHECK(!rf.marker_visible, "no destination → no marker");
   }
@@ -103,25 +106,24 @@ int main() {
     MapFrame fr = make_road_route_frame(MAP_FLAG_ROTATE, 900);
     CHECK(prepare_map_frame(&fr, &rf), "prepare (90°) returns true");
     /* route point (0,-200) = 200 m north; heading east → north is left
-       of screen: screen (-200, 0) + centre = (40, 240) */
-    CHECK(near32(rf.lines[2].pts[4], 40, 1) && near32(rf.lines[2].pts[5], 240, 1),
-          "route end rotated to (40,240) at heading 90°");
+       of screen: screen (-200, 0) + vehicle = (40, 320) */
+    CHECK(near32(rf.lines[2].pts[4], 40, 1) && near32(rf.lines[2].pts[5], 320, 1),
+          "route end rotated to (40,320) at heading 90°");
     /* road point (100, 0) = 100 m east = straight ahead → screen up:
-       centre (240,140). The centerline is now vertical, so its two edges
-       are at x=246 (e=0, +n) and x=234 (e=1, −n), same y. */
-    CHECK(near32(rf.lines[0].pts[2], 246, 1) && near32(rf.lines[0].pts[3], 140, 1),
-          "road edge A end (246,140) at heading 90°");
-    CHECK(near32(rf.lines[1].pts[2], 234, 1) && near32(rf.lines[1].pts[3], 140, 1),
-          "road edge B end (234,140) at heading 90°");
+       centre line now vertical at x=240 — casing and fill share points. */
+    CHECK(near32(rf.lines[0].pts[2], 240, 1) && near32(rf.lines[0].pts[3], 220, 1),
+          "road casing end (240,220) at heading 90°");
+    CHECK(near32(rf.lines[1].pts[2], 240, 1) && near32(rf.lines[1].pts[3], 220, 1),
+          "road fill end (240,220) at heading 90°");
   }
 
   /* ---- heading 180° (south): world -y (north) → screen down -------- */
   {
     MapFrame fr = make_road_route_frame(MAP_FLAG_ROTATE, 1800);
     CHECK(prepare_map_frame(&fr, &rf), "prepare (180°) returns true");
-    /* route end (0,-200): north → behind → screen (240, 440) */
-    CHECK(near32(rf.lines[2].pts[4], 240, 1) && near32(rf.lines[2].pts[5], 440, 1),
-          "route end rotated to (240,440) at heading 180°");
+    /* route end (0,-200): north → behind → screen (240, 320+200=520, off) */
+    CHECK(near32(rf.lines[2].pts[4], 240, 1) && near32(rf.lines[2].pts[5], 520, 1),
+          "route end rotated to (240,520) at heading 180°");
   }
 
   /* ---- destination marker ------------------------------------------ */
@@ -135,8 +137,8 @@ int main() {
     fr.segs[2].points[2] = 0;   fr.segs[2].points[3] = -160;
     CHECK(prepare_map_frame(&fr, &rf), "prepare (dest) returns true");
     CHECK(rf.marker_visible, "marker visible");
-    CHECK(near32(rf.marker_x, 240, 1) && near32(rf.marker_y, 80, 1),
-          "marker at (240,80)");
+    CHECK(near32(rf.marker_x, 240, 1) && near32(rf.marker_y, 160, 1),
+          "marker at (240,160)");   // 320-160: north of the vehicle
     CHECK(rf.line_count == 4, "road(2) + dest(1) + route(1) = 4 lines");
     /* destination line is accent-coloured by the renderer; check order:
        roads first, then destination, then route on top. */
@@ -160,9 +162,9 @@ int main() {
     }
     CHECK(prepare_map_frame(&fr, &rf), "prepare (30 roads) returns true");
     CHECK(rf.line_count <= MAP_POOL, "line_count within pool");
-    /* 30 roads but road_room=(30-2)/2=14 → 14 roads × 2 edges = 28 lines
+    /* 30 roads but road_room=(44-2)/2=21 → 21 roads × 2 lines = 42
        (capped by the route/destination reservation). */
-    CHECK(rf.line_count == 28, "pool capped at 28 edge lines for 30 roads");
+    CHECK(rf.line_count == 42, "pool capped at 42 lines for 30 roads");
   }
 
   /* ---- no rotation flag: geometry still centred (rotation is always
