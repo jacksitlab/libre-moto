@@ -88,6 +88,11 @@ bool          g_status_valid = false;
 bool          g_adv_running = false;
 uint32_t      g_adv_restart_at = 0;   /* 0 = no restart pending */
 
+/* --- Deferred connection-parameter update (spec CSS A 5.2: no   ---
+ * param request within the first 5 s after connect — it stalls some
+ * centrals' ATT pipeline). 0 = nothing pending. */
+uint32_t      g_conn_params_due_ms = 0;
+
 BLEServer     *g_server = nullptr;
 BLEService    *g_svc = nullptr;
 BLECharacteristic *g_nav_ch = nullptr;
@@ -166,21 +171,15 @@ void ble_link_init(const ble_link_cb *cb) {
       g_connected = true;
       g_adv_running = false;
       g_adv_restart_at = 0;
-      /* Short supervision timeout (200 units × 10 ms = 2 s): when Android
-       * drops the link (Doze, range, stack reset), the ESP32 notices within
-       * ~2 s instead of the default 5-30 s. Otherwise it holds a PHANTOM
-       * connection, cannot re-advertise, and the app's reconnect scan finds
-       * nothing for tens of seconds (user-visible: display says connected
-       * while the app retries and fails). The central may reject; then the
-       * default applies — but Android normally accepts. */
-      {
-        auto peers = pServer->getPeerDevices(false /* server side */);
-        for (auto &kv : peers) {
-          /* interval 15-25 (×1.25 ms = 19-31 ms), latency 0,
-           * timeout 200 (×10 ms = 2 s) */
-          pServer->requestConnParams(kv.first, 15, 25, 0, 200);
-        }
-      }
+      /* Short supervision timeout (200 units × 10 ms = 2 s) is requested
+       * DEFERRED from poll() — NOT here: the Bluetooth spec (CSS Part A
+       * 5.2) says a peripheral must not send a connection-parameter
+       * update request within the first 5 s after connect. Sending it
+       * from onConnect stalled the peer's ATT pipeline on the test
+       * tablet: Android accepted exactly one GATT command, then refused
+       * every further write with 'prior command is not finished' —
+       * no nav/map data flowed at all. poll() sends it at >= 5 s. */
+      g_conn_params_due_ms = millis() + 5000;
       Serial.println("[BLE] connected");
     }
     void onDisconnect(BLEServer * /*pServer*/) override {
@@ -188,6 +187,7 @@ void ble_link_init(const ble_link_cb *cb) {
       /* spec §6: restart advertising immediately, 3 s jitter */
       g_adv_restart_at = millis() + AD_RESTART_JITTER_MS;
       g_adv_running = false;
+      g_conn_params_due_ms = 0;   /* stale request — new connect reschedules */
       map_reset();
       Serial.println("[BLE] disconnected (adv restart in ~3 s)");
     }
@@ -259,6 +259,21 @@ void ble_link_init(const ble_link_cb *cb) {
 
 void ble_link_poll() {
   if (!g_server) return;
+
+  /* 0. Deferred connection-parameter update (see onConnect): request
+   * the short 2 s supervision timeout only >= 5 s after connect, as
+   * the spec requires. Sent once; cleared on disconnect. */
+  if (g_conn_params_due_ms && g_connected &&
+      (int32_t)(millis() - g_conn_params_due_ms) >= 0) {
+    auto peers = g_server->getPeerDevices(false /* server side */);
+    for (auto &kv : peers) {
+      /* interval 15-25 (×1.25 ms = 19-31 ms), latency 0,
+       * timeout 200 (×10 ms = 2 s) */
+      g_server->requestConnParams(kv.first, 15, 25, 0, 200);
+    }
+    g_conn_params_due_ms = 0;
+    Serial.println("[BLE] conn params requested (>=5 s after connect)");
+  }
 
   /* 1. Drain NavData queue → callback on ARDUINO core.
    * Collect pending slots first (mutex), then fire outside the lock. */

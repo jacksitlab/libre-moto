@@ -11,6 +11,38 @@
 #include "../ble/ble_link.h"   /* GATT server: NavData/Status/MapData/Control         */
 #include "../map/map_frame.h"  /* MapData binary frames (protocol.md §4)              */
 #include "../map/map_render.h" /* prepare_map_frame(): geometry stage (comm thread)   */
+#include "libremoto_icon.h"    /* the LibreMoto mark (generated from docs/icon.svg)    */
+#include "libremoto_logo.h"    /* the wordmark (generated from docs/logo.svg)         */
+
+/* LVGL 9 image descriptor for the icon (ARGB8888, 200×200). */
+static const lv_image_dsc_t libremoto_icon = {
+  .header = {
+    .magic = LV_IMAGE_HEADER_MAGIC,
+    .cf = LV_COLOR_FORMAT_ARGB8888,
+    .flags = 0,
+    .w = 200,
+    .h = 200,
+    .stride = 200 * 4,
+    .reserved_2 = 0,
+  },
+  .data_size = 200 * 200 * 4,
+  .data = libremoto_icon_map,
+};
+
+/* LVGL 9 image descriptor for the wordmark (ARGB8888, 480×188). */
+static const lv_image_dsc_t libremoto_logo = {
+  .header = {
+    .magic = LV_IMAGE_HEADER_MAGIC,
+    .cf = LV_COLOR_FORMAT_ARGB8888,
+    .flags = 0,
+    .w = 480,
+    .h = 188,
+    .stride = 480 * 4,
+    .reserved_2 = 0,
+  },
+  .data_size = 480 * 188 * 4,
+  .data = libremoto_logo_map,
+};
 
 /*---------------------------------------------------------------
  * Hardware (CrowPanel 2.1" — see docs/hardware.md)
@@ -31,19 +63,11 @@ static uint8_t *buf1 = NULL;
 static uint8_t *buf2 = NULL;
 
 static lv_obj_t *home_screen = NULL;
-static lv_obj_t *home_title = NULL;
+static lv_obj_t *home_icon = NULL;
 static lv_obj_t *ble_dot = NULL;
-static lv_obj_t *ble_label = NULL;
-static lv_obj_t *home_msg = NULL;
-static lv_obj_t *bright_bar = NULL;
 static lv_obj_t *toast_label = NULL;
 static lv_timer_t *toast_timer = NULL;
 
-static lv_obj_t *nav_screen = NULL;
-static lv_obj_t *nav_arrow = NULL;   // polyline, big maneuver arrow
-static lv_obj_t *nav_dist = NULL;    // "350 m"
-static lv_obj_t *nav_text = NULL;    // road name
-static lv_obj_t *nav_status = NULL;  // "Link lost" / "Arrived" / ""
 
 static lv_obj_t *map_screen = NULL;
 /* segment pool: MAP_POOL lines, created once, refilled per frame.
@@ -51,10 +75,15 @@ static lv_obj_t *map_screen = NULL;
    ESP32 line budget for the two-pass casing+fill render. */
 #define MAP_POOL      44
 static lv_obj_t *map_lines[MAP_POOL];
-static lv_obj_t *map_vehicle = NULL;   /* triangle: heading arrow (fixed) or marker (rotating) */
+static lv_obj_t *map_vehicle = NULL;        /* Beeline diamond, black core */
+static lv_obj_t *map_vehicle_outer = NULL;  /* ... white rim (under it)   */
 static lv_obj_t *map_marker = NULL;    /* destination marker (rotating frame) */
 static lv_obj_t *map_scale = NULL;     /* scale bar line */
 static lv_obj_t *map_label = NULL;     /* heading / scale label */
+static lv_obj_t *map_nav_arrow = NULL; /* maneuver arrow (info bar, top) */
+static lv_obj_t *map_nav_dist = NULL;  /* "350 m" (info bar) */
+static lv_obj_t *map_limit = NULL;     /* speed limit sign circle */
+static lv_obj_t *map_limit_label = NULL; /* ... the number inside */
 
 static lv_obj_t *active_screen = NULL;
 static lv_timer_t *ble_timer = NULL;
@@ -66,6 +95,8 @@ static bool        have_nav = false; /* at least one valid frame received  */
 static uint32_t    rx_count = 0;     /* received frames (BLE-ready count)  */
 static uint32_t    rx_ok_count = 0;   /* ... of which parsed OK             */
 static unsigned long last_data_ms = 0;/* millis() of last valid frame       */
+static unsigned long g_splash_until_ms = 0; /* 0 = no splash pending        */
+static lv_obj_t *g_splash_screen = NULL;    /* boot splash (deleted on exit) */
 static AppState    app = APP_IDLE;
 
 /* ---- MapFrame statistics (protocol.md §3/§4; render = C.1) ---- */
@@ -126,30 +157,6 @@ static void ui_push(const struct ui_msg *m) {
   xSemaphoreGive(g_ui_mux);
 }
 
-/* TEMPORARY — do NOT commit.  Serial-Console diagnostic. */
-static uint32_t      serial_rx_bytes = 0;
-static unsigned long serial_last_byte_ms = 0;
-static lv_obj_t     *serial_status_label = NULL;
-
-static void serial_status_update(void) {
-  if (!serial_status_label) return;
-  uint32_t avail = (uint32_t)Serial.available();
-  unsigned long age = (millis() > serial_last_byte_ms)
-                         ? (unsigned long)(millis() - serial_last_byte_ms)
-                         : 0;
-  if (serial_rx_bytes == 0)
-    lv_label_set_text_fmt(serial_status_label,
-      "SERIAL:  no bytes yet\n"
-      "  check:  USB-CDC?  baud 115200?\n"
-      "  monitor:  115200  NL=New Line");
-  else
-    lv_label_set_text_fmt(serial_status_label,
-      "SERIAL:  %lu B  avail=%lu\n"
-      "  last byte:  %lu ms ago",
-      (unsigned long)serial_rx_bytes,
-      (unsigned long)avail,
-      (unsigned long)age);
-}
 
 /* colors (dark theme, see docs/design.md) */
 static const lv_color_t C_BG      = lv_color_hex(0x0D1117);
@@ -237,7 +244,6 @@ void my_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data) {
 static void apply_brightness(int pct) {
   brightness_pct = constrain(pct, BRIGHTNESS_MIN_PCT, 100);
   ledcWrite(SCREEN_BACKLIGHT_PIN, (brightness_pct * 255) / 100);
-  if (bright_bar) lv_bar_set_value(bright_bar, brightness_pct, LV_ANIM_OFF);
   /* Persist async-ish: NVS writes are cheap at 2 Hz */
   prefs.begin("lm", false);
   prefs.putInt("bright", brightness_pct);
@@ -261,107 +267,39 @@ static lv_obj_t *new_screen() {
 static void create_home_screen(void) {
   home_screen = new_screen();
 
-  home_title = lv_label_create(home_screen);
-  lv_label_set_text(home_title, "LibreMoto");
-  lv_obj_set_style_text_font(home_title, &lv_font_montserrat_34, 0);
-  lv_obj_set_style_text_color(home_title, C_TEXT, 0);
-  lv_obj_align(home_title, LV_ALIGN_CENTER, 0, -120);
+  /* The LibreMoto mark (motorcycle icon from docs/icon.svg), centered,
+   * large — the minimal home screen: just the icon + BLE status dot. */
+  home_icon = lv_img_create(home_screen);
+  lv_img_set_src(home_icon, &libremoto_icon);
+  lv_img_set_antialias(home_icon, true);
+  lv_obj_align(home_icon, LV_ALIGN_CENTER, 0, -60);
 
   ble_dot = lv_obj_create(home_screen);
   lv_obj_remove_style_all(ble_dot);
-  lv_obj_set_size(ble_dot, 18, 18);
-  lv_obj_set_style_radius(ble_dot, 9, 0);
+  lv_obj_set_size(ble_dot, 22, 22);
+  lv_obj_set_style_radius(ble_dot, 11, 0);
   lv_obj_set_style_bg_color(ble_dot, C_WARN, 0);
   lv_obj_set_style_bg_opa(ble_dot, LV_OPA_COVER, 0);
-  lv_obj_align(ble_dot, LV_ALIGN_CENTER, -90, -42);
-
-  ble_label = lv_label_create(home_screen);
-  lv_label_set_text(ble_label, "BLE: standby");
-  lv_obj_set_style_text_font(ble_label, &lv_font_montserrat_18, 0);
-  lv_obj_set_style_text_color(ble_label, C_TEXT2, 0);
-  lv_obj_align(ble_label, LV_ALIGN_CENTER, 30, -42);
-
-  home_msg = lv_label_create(home_screen);
-  lv_label_set_text(home_msg, "Ready.\nTap: next screen  \u2022  Hold: home\nSwipe left/right: brightness");
-  lv_obj_set_style_text_font(home_msg, &lv_font_montserrat_14, 0);
-  lv_obj_set_style_text_color(home_msg, C_TEXT2, 0);
-  lv_obj_align(home_msg, LV_ALIGN_CENTER, 0, 30);
-
-  bright_bar = lv_bar_create(home_screen);
-  lv_obj_set_size(bright_bar, 240, 14);
-  lv_obj_set_style_bg_color(bright_bar, C_TEXT2, 0);
-  lv_obj_set_style_bg_opa(bright_bar, LV_OPA_30, 0);
-  lv_obj_set_style_radius(bright_bar, 7, 0);
-  lv_obj_set_style_bg_color(bright_bar, C_ACCENT, LV_PART_INDICATOR);
-  lv_obj_set_style_bg_opa(bright_bar, LV_OPA_COVER, LV_PART_INDICATOR);
-  lv_obj_align(bright_bar, LV_ALIGN_CENTER, 0, 110);
-  lv_obj_remove_flag(bright_bar, LV_OBJ_FLAG_CLICKABLE);
-  lv_bar_set_range(bright_bar, 0, 100);
-  lv_bar_set_value(bright_bar, brightness_pct, LV_ANIM_OFF);
-
-  /* TEMPORARY — do NOT commit.  Serial diagnostic label. */
-  serial_status_label = lv_label_create(home_screen);
-  lv_obj_set_style_text_font(serial_status_label, &lv_font_montserrat_14, 0);
-  lv_obj_set_style_text_color(serial_status_label, C_ACCENT, 0);
-  lv_obj_set_width(serial_status_label, 460);
-  lv_label_set_text(serial_status_label, "SERIAL:  checking…");
-  lv_obj_align(serial_status_label, LV_ALIGN_CENTER, 0, 165);
-  /* ------------------------- END TEMPORARY ------------------- */
+  lv_obj_align(ble_dot, LV_ALIGN_CENTER, 0, 80);
 }
 
-/* Maneuver arrow (lv_line, 120\u00d7120 box at object pos) */
-static void set_arrow(const char *dir) {
+/* Maneuver arrow points (shared shapes, 120×120 box; the caller sets
+ * the object size so the same shapes scale for big/small arrows). */
+static const lv_point_precise_t AR_L[4] = {{112,60}, {12,60}, {12,25}, {12,95}};
+static const lv_point_precise_t AR_R[4] = {{8,60}, {108,60}, {108,25}, {108,95}};
+static const lv_point_precise_t AR_S[3] = {{10,112}, {60,8}, {110,112}};
+static const lv_point_precise_t AR_U[4] = {{112,105}, {112,35}, {8,35}, {8,105}};
+
+/** Set the maneuver arrow on ANY lv_line (shapes in a 120×120 box). */
+static void set_arrow_pts(lv_obj_t *line, const char *dir) {
   static lv_point_precise_t pts[8];
-  int n;
-  /* left: shaft + head pointing left    */
-  static const lv_point_precise_t L[4] = {{112,60}, {12,60}, {12,25}, {12,95}};
-  /* right: shaft + head pointing right  */
-  static const lv_point_precise_t R[4] = {{8,60}, {108,60}, {108,25}, {108,95}};
-  /* straight: up arrow                  */
-  static const lv_point_precise_t S[3] = {{10,112}, {60,8}, {110,112}};
-  /* U-turn (approx)                     */
-  static const lv_point_precise_t U[4] = {{112,105}, {112,35}, {8,35}, {8,105}};
-  const lv_point_precise_t *A;
-  if      (!strcmp(dir, "left"))  { A = L; n = 4; }
-  else if (!strcmp(dir, "right")) { A = R; n = 4; }
-  else if (!strcmp(dir, "uturn")) { A = U; n = 4; }
-  else                            { A = S; n = 3; }
+  const lv_point_precise_t *A; int n;
+  if      (!strcmp(dir, "left"))  { A = AR_L; n = 4; }
+  else if (!strcmp(dir, "right")) { A = AR_R; n = 4; }
+  else if (!strcmp(dir, "uturn")) { A = AR_U; n = 4; }
+  else                            { A = AR_S; n = 3; }
   for (int i = 0; i < n; i++) pts[i] = A[i];
-  lv_line_set_points(nav_arrow, pts, (uint32_t)n);
-}
-
-static void create_nav_screen(void) {
-  nav_screen = new_screen();
-
-  nav_arrow = lv_line_create(nav_screen);
-  lv_obj_set_size(nav_arrow, 120, 120);
-  lv_obj_align(nav_arrow, LV_ALIGN_CENTER, -170, 0);
-  lv_obj_set_style_line_width(nav_arrow, 12, 0);
-  lv_obj_set_style_line_color(nav_arrow, C_TEXT, 0);
-  lv_obj_set_style_line_rounded(nav_arrow, true, 0);
-  lv_obj_remove_flag(nav_arrow, LV_OBJ_FLAG_CLICKABLE);
-
-  nav_dist = lv_label_create(nav_screen);
-  lv_label_set_text(nav_dist, "350 m");
-  lv_obj_set_style_text_font(nav_dist, &lv_font_montserrat_34, 0);
-  lv_obj_set_style_text_color(nav_dist, C_TEXT, 0);
-  lv_obj_align(nav_dist, LV_ALIGN_CENTER, 40, -20);
-  lv_obj_remove_flag(nav_dist, LV_OBJ_FLAG_CLICKABLE);
-
-  nav_text = lv_label_create(nav_screen);
-  lv_label_set_text(nav_text, "Main St.");
-  lv_obj_set_style_text_font(nav_text, &lv_font_montserrat_18, 0);
-  lv_obj_set_style_text_color(nav_text, C_TEXT2, 0);
-  lv_obj_align(nav_text, LV_ALIGN_CENTER, 40, 22);
-  lv_obj_remove_flag(nav_text, LV_OBJ_FLAG_CLICKABLE);
-
-  nav_status = lv_label_create(nav_screen);
-  lv_label_set_text(nav_status, "");
-  lv_obj_set_style_text_font(nav_status, &lv_font_montserrat_18, 0);
-  lv_obj_set_style_text_color(nav_status, C_WARN, 0);
-  lv_obj_align(nav_status, LV_ALIGN_CENTER, 0, 150);
-
-  set_arrow("left");
+  lv_line_set_points(line, pts, (uint32_t)n);
 }
 
 static void create_map_screen(void) {
@@ -385,24 +323,35 @@ static void create_map_screen(void) {
        + marker created after the pool are drawn on top. */
   }
 
-  /* ---- vehicle marker: white arrowhead "^" (chevron), tip pointing up ---- */
-  map_vehicle = lv_line_create(map_screen);
-  /* tip (240,292), wings (220,326) (260,326) — a bold "^" chevron at the
-     VEHICLE position (MAP_CX/MAP_CY = 240/320, one third from the bottom).
-     Points MUST live in a static buffer: lv_line keeps only the pointer
-     and the array must outlive this function (stack would dangle). */
-  static lv_point_precise_t vehicle_pts[3];
-  vehicle_pts[0].x = 220; vehicle_pts[0].y = 326;
-  vehicle_pts[1].x = 240; vehicle_pts[1].y = 292;
-  vehicle_pts[2].x = 260; vehicle_pts[2].y = 326;
-  lv_line_set_points(map_vehicle, vehicle_pts, 3);
-  lv_obj_set_size(map_vehicle, 480, 480);   /* screen-absolute points */
-  lv_obj_align(map_vehicle, LV_ALIGN_TOP_LEFT, 0, 0);
-  lv_obj_set_style_line_width(map_vehicle, 10, 0);
-  lv_obj_set_style_line_color(map_vehicle, C_TEXT, 0);  /* white */
-  lv_obj_set_style_line_rounded(map_vehicle, true, 0);
+  /* ---- vehicle marker: Beeline-style diamond — white border, black core.
+     Two squares rotated 45° (LVGL transform), the smaller on top:
+     white 30 px under black 20 px = a diamond with a white rim.
+     Points at the vehicle position (MAP_CX/MAP_CY = 240/320). */
+  map_vehicle_outer = lv_obj_create(map_screen);
+  lv_obj_remove_style_all(map_vehicle_outer);
+  lv_obj_set_size(map_vehicle_outer, 30, 30);
+  lv_obj_set_style_radius(map_vehicle_outer, 4, 0);
+  lv_obj_set_style_bg_color(map_vehicle_outer, C_TEXT, 0);   /* white rim */
+  lv_obj_set_style_bg_opa(map_vehicle_outer, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(map_vehicle_outer, 0, 0);
+  lv_obj_set_style_transform_rotation(map_vehicle_outer, 450, 0);
+  lv_obj_set_style_transform_pivot_x(map_vehicle_outer, 15, 0);
+  lv_obj_set_style_transform_pivot_y(map_vehicle_outer, 15, 0);
+  lv_obj_set_pos(map_vehicle_outer, 240 - 15, 320 - 15);
+  lv_obj_remove_flag(map_vehicle_outer, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
+
+  map_vehicle = lv_obj_create(map_screen);
+  lv_obj_remove_style_all(map_vehicle);
+  lv_obj_set_size(map_vehicle, 20, 20);
+  lv_obj_set_style_radius(map_vehicle, 3, 0);
+  lv_obj_set_style_bg_color(map_vehicle, C_BG, 0);          /* black core */
+  lv_obj_set_style_bg_opa(map_vehicle, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(map_vehicle, 0, 0);
+  lv_obj_set_style_transform_rotation(map_vehicle, 450, 0);
+  lv_obj_set_style_transform_pivot_x(map_vehicle, 10, 0);
+  lv_obj_set_style_transform_pivot_y(map_vehicle, 10, 0);
+  lv_obj_set_pos(map_vehicle, 240 - 10, 320 - 10);
   lv_obj_remove_flag(map_vehicle, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
-  lv_obj_remove_flag(map_vehicle, LV_OBJ_FLAG_HIDDEN);
 
   /* ---- destination dot marker (rotating frame only) ----------------- */
   map_marker = lv_obj_create(map_screen);
@@ -436,6 +385,47 @@ static void create_map_screen(void) {
   lv_obj_set_style_text_color(map_label, C_TEXT2, 0);
   lv_obj_align(map_label, LV_ALIGN_CENTER, 0, -215);
   lv_obj_remove_flag(map_label, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
+
+  /* ---- nav info bar (top): maneuver arrow + distance + speed limit.
+     Replaces the removed nav screen — the map is THE navigation view. */
+  map_nav_arrow = lv_line_create(map_screen);
+  lv_obj_set_size(map_nav_arrow, 48, 48);
+  lv_obj_align(map_nav_arrow, LV_ALIGN_TOP_LEFT, 16, 12);
+  lv_obj_set_style_line_width(map_nav_arrow, 7, 0);
+  lv_obj_set_style_line_color(map_nav_arrow, C_TEXT, 0);
+  lv_obj_set_style_line_rounded(map_nav_arrow, true, 0);
+  lv_obj_remove_flag(map_nav_arrow, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
+  set_arrow_pts(map_nav_arrow, "straight");
+
+  map_nav_dist = lv_label_create(map_screen);
+  lv_label_set_text(map_nav_dist, "—");
+  lv_obj_set_style_text_font(map_nav_dist, &lv_font_montserrat_34, 0);
+  lv_obj_set_style_text_color(map_nav_dist, C_TEXT, 0);
+  lv_obj_align(map_nav_dist, LV_ALIGN_TOP_LEFT, 76, 14);
+  lv_obj_remove_flag(map_nav_dist, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
+
+  /* speed limit sign: white circle, red ring, number inside */
+  map_limit = lv_obj_create(map_screen);
+  lv_obj_remove_style_all(map_limit);
+  lv_obj_set_size(map_limit, 64, 64);
+  lv_obj_set_style_radius(map_limit, 32, 0);
+  lv_obj_set_style_bg_color(map_limit, C_TEXT, 0);
+  lv_obj_set_style_bg_opa(map_limit, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(map_limit, 7, 0);
+  lv_obj_set_style_border_color(map_limit, C_BAD, 0);      /* red ring */
+  lv_obj_align(map_limit, LV_ALIGN_TOP_RIGHT, -16, 10);
+  lv_obj_remove_flag(map_limit, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
+  lv_obj_add_flag(map_limit, LV_OBJ_FLAG_HIDDEN);          /* shown when limit > 0 */
+
+  map_limit_label = lv_label_create(map_screen);
+  lv_label_set_text(map_limit_label, "50");
+  lv_obj_set_style_text_font(map_limit_label, &lv_font_montserrat_34, 0);
+  lv_obj_set_style_text_color(map_limit_label, C_BG, 0);   /* black on white */
+  lv_obj_align(map_limit_label, LV_ALIGN_TOP_RIGHT, -16, 10);
+  lv_obj_add_flag(map_limit_label, LV_OBJ_FLAG_IGNORE_LAYOUT);
+  lv_obj_align_to(map_limit_label, map_limit, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_remove_flag(map_limit_label, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
+  lv_obj_add_flag(map_limit_label, LV_OBJ_FLAG_HIDDEN);
 }
 
 /*---------------------------------------------------------------
@@ -466,29 +456,32 @@ static void goto_screen(lv_obj_t *scr, const char *name);
 static void toast(const char *text, lv_color_t color);
 static void toast_debug(const char *text, lv_color_t color, uint32_t ms);
 
-/* Render the current NavState on the nav screen (arrow + distance + road). */
+/* Render the current NavState on the MAP INFO BAR (top): maneuver
+ * arrow + distance + speed-limit sign. The old nav screen is gone —
+ * the map is THE navigation view. */
 static void render_nav_from_state(void) {
-  set_arrow(g_nav.maneuver[0] ? g_nav.maneuver : "straight");
-  char d[16];
-  if (g_nav.dist_m > 0)      snprintf(d, sizeof d, "%d m", g_nav.dist_m);
-  else if (g_nav.limit_kmh > 0) snprintf(d, sizeof d, "Limit %d", g_nav.limit_kmh);
-  else                       strcpy(d, "\u2014");
-  lv_label_set_text(nav_dist, d);
+  if (map_nav_arrow)
+    set_arrow_pts(map_nav_arrow, g_nav.maneuver[0] ? g_nav.maneuver : "straight");
 
-  const char *road = (g_nav.text[0] ? g_nav.text : "");
-  lv_label_set_text(nav_text, road);
-  lv_obj_set_style_text_color(nav_text, g_nav.text[0] ? C_TEXT2 : C_TEXT2, 0);
+  if (map_nav_dist) {
+    char d[16];
+    if (g_nav.dist_m > 0) snprintf(d, sizeof d, "%d m", g_nav.dist_m);
+    else                  strcpy(d, "\u2014");
+    lv_label_set_text(map_nav_dist, d);
+  }
 
-  if (g_nav.batt_pct >= 0) {
-    char b[16];
-    snprintf(b, sizeof b, "Bat %d%%", g_nav.batt_pct);
-    /* show limit/batt in the status line if present, else free for "Reroute" */
-    if (g_nav.limit_kmh > 0 && (g_nav.dist_m > 0 || !g_nav.text[0])) {
-      char s[32];
-      snprintf(s, sizeof s, "Limit %d km/h  \u2022  %s", g_nav.limit_kmh, b);
-      lv_label_set_text(nav_status, s);
+  /* speed limit sign (top right): shown only when the app provides one */
+  bool showLimit = g_nav.limit_kmh > 0;
+  if (map_limit) {
+    if (showLimit) {
+      lv_obj_remove_flag(map_limit, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_remove_flag(map_limit_label, LV_OBJ_FLAG_HIDDEN);
+      char s[8];
+      snprintf(s, sizeof s, "%d", g_nav.limit_kmh);
+      lv_label_set_text(map_limit_label, s);
     } else {
-      lv_label_set_text(nav_status, b);
+      lv_obj_add_flag(map_limit, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_add_flag(map_limit_label, LV_OBJ_FLAG_HIDDEN);
     }
   }
 }
@@ -500,29 +493,32 @@ static void on_nav_state(const NavState &st) {
   last_data_ms = millis();
   rx_ok_count++;
 
-  /* Reroute: phone is recomputing — flash a status hint, stay on nav screen */
+  /* Reroute: phone is recomputing — flash a status hint, stay on map.
+   * During the boot splash: record state but DON'T switch screens —
+   * the splash exit picks the right screen for the final app state. */
   static bool reroute_hint = false;
   if (st.msg_type == NAV_MSG_REROUTE) {
-    if (app != APP_NAV) { app = APP_NAV; goto_screen(nav_screen, "nav (reroute)"); }
-    reroute_hint = !reroute_hint;
-    if (nav_status) {
-      lv_label_set_text(nav_status, reroute_hint ? "Route wird berechnet…" : " ");
-      lv_obj_set_style_text_color(nav_status, C_WARN, 0);
+    if (app != APP_NAV) {
+      app = APP_NAV;
+      if (!g_splash_until_ms) goto_screen(map_screen, "map (reroute)");
     }
+    reroute_hint = !reroute_hint;
+    if (reroute_hint) toast("Route wird berechnet…", C_WARN);
     return;
   }
 
   switch (st.msg_type) {
     case NAV_MSG_BEEP:
       /* heartbeat: keeps the link alive; does not change state (protocol.md).
-       * Toast doubles as the on-board BLE test aid (no state to change). */
-      toast("Heartbeat ✓", C_ACCENT);
+       * No toast — the app pings every 5 s while idle; a toast would
+       * flicker over the home screen permanently. The link status is
+       * visible via the BLE dot colour. */
       break;
 
     case NAV_MSG_NAV: {
       if (app != APP_NAV) {
         app = APP_NAV;
-        goto_screen(st.map_on ? map_screen : nav_screen, st.map_on ? "map (nav)" : "nav");
+        if (!g_splash_until_ms) goto_screen(map_screen, "map (nav)");
       }
       render_nav_from_state();
       break;
@@ -531,7 +527,7 @@ static void on_nav_state(const NavState &st) {
     case NAV_MSG_IDLE:
       app = APP_IDLE;
       state_until_ms = 0;
-      goto_screen(home_screen, "home (idle)");
+      if (!g_splash_until_ms) goto_screen(home_screen, "home (idle)");
       break;
 
     case NAV_MSG_ARRIVED:
@@ -542,7 +538,7 @@ static void on_nav_state(const NavState &st) {
         lv_obj_set_style_text_color(info_title, C_ACCENT, 0);
         lv_label_set_text(info_sub, "Zurück: Touch halten");
       }
-      goto_screen(info_screen, "arrived");
+      if (!g_splash_until_ms) goto_screen(info_screen, "arrived");
       break;
 
     default:
@@ -558,6 +554,25 @@ static void on_nav_state(const NavState &st) {
  *--------------------------------------------------------------*/
 static void handle_state_timeouts(void) {
   unsigned long now = millis();
+
+  /* splash → the screen matching the CURRENT app state. If nav frames
+   * arrived during the splash (app already NAV), the map is the right
+   * screen — the old unconditional home switch is what made 'no map
+   * data' look like a transfer problem. */
+  if (g_splash_until_ms && now >= g_splash_until_ms) {
+    g_splash_until_ms = 0;
+    lv_obj_t *target = home_screen;
+    const char *why = "home (splash done)";
+    if (app == APP_NAV)        { target = map_screen;  why = "map (splash done, nav)"; }
+    else if (app == APP_ARRIVED) { target = info_screen; why = "info (splash done, arrived)"; }
+    active_screen = target;
+    lv_scr_load(target);               /* hard switch — no fade ref to splash */
+    if (g_splash_screen) {
+      lv_obj_delete_async(g_splash_screen);   /* free the splash (160 KB) */
+      g_splash_screen = NULL;
+    }
+    Serial.printf("[UI] -> %s\n", why);
+  }
 
   /* NAV → LOST: link silence while navigating */
   if (have_nav && app == APP_NAV && now - last_data_ms > LINK_TIMEOUT_MS) {
@@ -716,6 +731,10 @@ static void render_map_display(const MapRenderFrame *rf) {
   if (map_vehicle) {
     if (!rf->show_vehicle) lv_obj_add_flag(map_vehicle, LV_OBJ_FLAG_HIDDEN);
     else                   lv_obj_remove_flag(map_vehicle, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (map_vehicle_outer) {
+    if (!rf->show_vehicle) lv_obj_add_flag(map_vehicle_outer, LV_OBJ_FLAG_HIDDEN);
+    else                   lv_obj_remove_flag(map_vehicle_outer, LV_OBJ_FLAG_HIDDEN);
   }
 
   /* ---- scale bar + caption ---------------------------------------- */
@@ -901,21 +920,14 @@ static void ble_blink_cb(lv_timer_t *t) {
 
   if (!ble_link_connected()) {
     if (ble_dot)   lv_obj_set_style_bg_color(ble_dot, lv_color_hex(0x3B4148), 0);
-    if (ble_label) lv_label_set_text(ble_label, "BLE: offline");
     return;
   }
 
   if (app == APP_IDLE) {
     on = !on;
-    if (ble_dot)   lv_obj_set_style_bg_color(ble_dot, on ? C_WARN : lv_color_hex(0x3B4148), 0);
-    if (ble_label) lv_label_set_text(ble_label, "BLE: standby");
+    if (ble_dot) lv_obj_set_style_bg_color(ble_dot, on ? C_WARN : lv_color_hex(0x3B4148), 0);
   } else {
-    if (ble_dot)   lv_obj_set_style_bg_color(ble_dot, (app == APP_LOST) ? C_BAD : C_ACCENT, 0);
-    if (ble_label) {
-      if (app == APP_LOST)         lv_label_set_text(ble_label, "BLE: link lost");
-      else if (app == APP_ARRIVED) lv_label_set_text(ble_label, "BLE: connected \u2713");
-      else                         lv_label_set_text(ble_label, "BLE: connected \u2713");
-    }
+    if (ble_dot) lv_obj_set_style_bg_color(ble_dot, (app == APP_LOST) ? C_BAD : C_ACCENT, 0);
   }
 }
 
@@ -1102,8 +1114,7 @@ static void handle_serial(void) {
   while (Serial.available()) {
     char c = Serial.read();
     /* temporary diagnostic — do NOT commit */
-    serial_rx_bytes++;
-    serial_last_byte_ms = millis();
+
     if (c == '\n' || c == '\r') {
       if (li == 0) continue;
       line[li] = 0;
@@ -1113,7 +1124,7 @@ static void handle_serial(void) {
       if (!line[0]) continue;
 
       if (line[0] == 'h')                 goto_screen(home_screen, "home");
-      else if (line[0] == 'n')            goto_screen(nav_screen, "nav");
+      else if (line[0] == 'n')            goto_screen(map_screen, "map");
       else if (line[0] == 'm' && line[1] == 't') {
         handle_map_test(line);            /* 'mt' must precede the 'm' test */
       }
@@ -1158,12 +1169,15 @@ static bool g_gesture_fired = false;
 
 static void cycle_screen(void) {
   if (!active_screen) return;
-  if      (active_screen == home_screen) goto_screen(nav_screen, "nav (tap)");
-  else if (active_screen == nav_screen)  goto_screen(map_screen, "map (tap)");
+  if      (active_screen == home_screen) goto_screen(map_screen, "map (tap)");
   else                                 goto_screen(home_screen, "home (tap)");
 }
 
 static void handle_gesture_state(void) {
+  /* during the boot splash: ignore input — no screen switching away
+   * from a screen that then gets deleted under the fade animation */
+  if (g_splash_until_ms) return;
+
   bool touching = ts_panel.touched();
 
   if (touching && !g_touch_down) {
@@ -1325,8 +1339,29 @@ void setup() {
   lv_indev_set_read_cb(touch_indev, my_touchpad_read);
   lv_indev_set_display(touch_indev, display);
 
+  /* ---- splash FIRST: paint the logo BEFORE the remaining boot work
+   * (screen creation, BLE GATT init) — otherwise the splash never
+   * shows: rendering normally starts only in loop(). One manual
+   * lv_timer_handler() here flushes the splash to the panel now. */
+  {
+    lv_obj_t *def = lv_scr_act();
+    g_splash_screen = lv_obj_create(NULL);
+    lv_obj_remove_style_all(g_splash_screen);
+    lv_obj_set_size(g_splash_screen, SCREEN_W, SCREEN_H);
+    lv_obj_set_style_bg_color(g_splash_screen, C_BG, 0);
+    lv_obj_set_style_bg_opa(g_splash_screen, LV_OPA_COVER, 0);
+    lv_obj_t *img = lv_img_create(g_splash_screen);
+    lv_img_set_src(img, &libremoto_logo);   /* the wordmark, not the icon */
+    lv_img_set_antialias(img, true);
+    lv_obj_align(img, LV_ALIGN_CENTER, 0, 0);
+    lv_scr_load(g_splash_screen);     /* force — no anim */
+    lv_obj_delete(def);               /* drop the default blank screen */
+    active_screen = g_splash_screen;  /* gestures see a valid screen  */
+    lv_timer_handler();               /* PAINT now, before BLE init    */
+    g_splash_until_ms = millis() + 2000;
+  }
+
   create_home_screen();
-  create_nav_screen();
   create_map_screen();
   create_info_screen();
 
@@ -1363,7 +1398,11 @@ void setup() {
 
   ble_timer = lv_timer_create(ble_blink_cb, 500, NULL);
 
-  goto_screen(home_screen, "home");
+  /* NO goto_screen(home_screen) here — the splash owns the display
+   * until g_splash_until_ms expires (handle_state_timeouts switches to
+   * home). The old unconditional switch right here is what made the
+   * splash invisible: it overwrote the splash before loop() ever
+   * rendered a frame. */
   Serial.println("Libre-Moto ready. Gestures: tap=cycle, hold=home, swipe=brightness");
   Serial.println("Serial cmds: h n m | b<0-100> | {\"v\":1,\"t\":...} (protocol.md §2)");
 }
@@ -1376,13 +1415,6 @@ void loop() {
   map_blit_if_new();        /* blit the latest prepared map frame */
   handle_gesture_state();
   handle_state_timeouts();
-  /* TEMPORARY — do NOT commit.  Update serial status label every 500 ms. */
-  static unsigned long last_ser_status = 0;
-  if (millis() - last_ser_status >= 500) {
-    last_ser_status = millis();
-    serial_status_update();
-  }
-  /* ------------------------- END TEMPORARY block --------------- */
   lv_timer_handler();
   delay(5);
 }
