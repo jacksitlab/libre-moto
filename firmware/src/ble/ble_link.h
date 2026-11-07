@@ -162,10 +162,25 @@ void ble_link_init(const ble_link_cb *cb) {
   /* GATT server with auto-adv on disconnect handled in ble_link_poll
    * (we own the advertising lifecycle, not the server callbacks). */
   struct server_cb : BLEServerCallbacks {
-    void onConnect(BLEServer * /*pServer*/) override {
+    void onConnect(BLEServer *pServer) override {
       g_connected = true;
       g_adv_running = false;
       g_adv_restart_at = 0;
+      /* Short supervision timeout (200 units × 10 ms = 2 s): when Android
+       * drops the link (Doze, range, stack reset), the ESP32 notices within
+       * ~2 s instead of the default 5-30 s. Otherwise it holds a PHANTOM
+       * connection, cannot re-advertise, and the app's reconnect scan finds
+       * nothing for tens of seconds (user-visible: display says connected
+       * while the app retries and fails). The central may reject; then the
+       * default applies — but Android normally accepts. */
+      {
+        auto peers = pServer->getPeerDevices(false /* server side */);
+        for (auto &kv : peers) {
+          /* interval 15-25 (×1.25 ms = 19-31 ms), latency 0,
+           * timeout 200 (×10 ms = 2 s) */
+          pServer->requestConnParams(kv.first, 15, 25, 0, 200);
+        }
+      }
       Serial.println("[BLE] connected");
     }
     void onDisconnect(BLEServer * /*pServer*/) override {
