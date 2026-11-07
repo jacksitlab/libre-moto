@@ -123,7 +123,11 @@ class StreamService : Service() {
                 Log.d(TAG, "Map: error ${e.message}")
             }
         }
+        // once a minute: TX health (callbacks vs pacing, queue depth)
+        if (++tickCounter % 60 == 0) ble?.txStats()?.let { Log.d(TAG, it) }
     }
+
+    private var tickCounter = 0
 
     private fun nextSeq(): Int { val v = seq; seq = (seq + 1) % 256; return v }
 

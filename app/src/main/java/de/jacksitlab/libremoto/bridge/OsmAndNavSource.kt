@@ -63,8 +63,16 @@ class OsmAndNavSource(
     @Volatile private var routePoints: List<ALatLon> = emptyList()
     @Volatile private var routeVersion: Int = 0
 
-    // Nearby roads (WGS84 polylines) — refreshed every tick
+    // Nearby roads (WGS84 polylines) — refreshed every tick.
+    // PRIMARY SOURCE: the prebuilt .lmm vector maps (MapManager) — a bbox
+    // query in memory, deterministic and complete (no 50 m proximity filter,
+    // no maxRoads cap, no OsmAnd CPU load). FALLBACK: AIDL getNearbyRoads,
+    // used when no .lmm region covers the position.
     @Volatile private var nearbyRoads: List<net.osmand.aidlapi.map.ARoadPolyline> = emptyList()
+    /** MapManager reference — set via attachMapManager(); owns the .lmm cache. */
+    @Volatile private var mapManager: MapManager? = null
+
+    fun attachMapManager(mm: MapManager) { mapManager = mm }
 
     // The last directionInfo we got, exposed for tests/inspection.
     var lastDirection: ADirectionInfo? = null
@@ -85,17 +93,47 @@ class OsmAndNavSource(
     @Volatile private var lastVehiclePos: ALatLon? = null
     @Volatile private var lastVehiclePosAtMs = 0L
 
+    /** Breadcrumb trail behind the vehicle (most recent first): the road we
+     *  actually rode. OsmAnd cuts the passed segment from the route, so the
+     *  corridor filter would cull the streets behind us — the trail gives
+     *  them their corridor back. Capped at ~1.5 km / 120 points. */
+    private val trail = ArrayList<LatLon>()
+    private var trailMetres = 0.0
+
     /** Aktueller Projektionsmaßstab px/m × 100 (wechselt weich mit der Geschwindigkeit). */
     @Volatile private var dynamicScale = 24   // Start: 1000 m Voraussicht
     /** Voraussicht in m, die der aktuelle dynamicScale abbildet (für Road-Radius). */
     @Volatile private var currentLookaheadM = 1000.0
+    /** Zoom-Hysterese: true = der Zoom folgt dem Ziel gerade (siehe 2c). */
+    @Volatile private var zoomTracking = true
 
-    /** Ziel-Skala aus der geglätteten Geschwindigkeit (px/m × 100). */
+    /** Ziel-Skala aus der geglätteten Geschwindigkeit (px/m × 100).
+     *  Reference: AHEAD_PX (320) — the display area in front of the vehicle
+     *  (look-ahead layout). The SAME metre specs (500 m city … 1000 m
+     *  country) now fill 320 px instead of 240 → everything renders 33 %
+     *  larger → much better readability at unchanged lookahead metres. */
     private fun targetScale(): Int {
         val t = ((smoothedSpeedKmh - zoomLowSpeedKmh) /
                  (zoomHighSpeedKmh - zoomLowSpeedKmh)).coerceIn(0.0, 1.0)
         val lookahead = zoomMinLookaheadM + t * (zoomMaxLookaheadM - zoomMinLookaheadM)
-        return (240.0 / lookahead * 100.0).toInt()
+        return (320.0 / lookahead * 100.0).toInt()
+    }
+
+    /** DISCRETE zoom levels: quantize the continuous target to steps of 8
+     *  (scale 24 = 1000 m, 32 = 750 m, 40 = 600 m, 48 = 500 m …) with a
+     *  ±(step/2+2) hysteresis. The EMA speed wobbles ±10 km/h in the city —
+     *  a continuously-tracked scale made the window breathe constantly
+     *  (96 changes in 7 min in lm-4.log), and every scale step dropped and
+     *  re-added the streets at the window edge (visible flicker). With
+     *  quantized levels the window only changes on REAL speed changes. */
+    private var quantTargetScale = 24   // start: 1000 m Voraussicht
+
+    private fun updateQuantTarget(contTarget: Int): Int {
+        val step = 8
+        val margin = step / 2 + 2   // 6: switch level only clearly beyond half a step
+        if (contTarget > quantTargetScale + margin) quantTargetScale += step
+        else if (contTarget < quantTargetScale - margin) quantTargetScale -= step
+        return quantTargetScale
     }
 
     private val callback = object : IOsmAndAidlCallback.Stub() {
@@ -196,6 +234,21 @@ class OsmAndNavSource(
             if (last != null && lastAt > 0 && now > lastAt) {
                 val dtS = (now - lastAt) / 1000.0
                 val distM = distanceM(last, pos)
+                // breadcrumb: extend the trail behind the vehicle
+                if (distM > 4.0) {   // ignore GPS jitter below 4 m
+                    trail.add(0, LatLon(last.latitude, last.longitude))
+                    trailMetres += distM
+                    while (trailMetres > 1500.0 && trail.size > 2) {
+                        val drop = trail.removeAt(trail.size - 1)
+                        val nxt = trail.lastOrNull()
+                        if (nxt != null) {
+                            trailMetres -= distanceM(
+                                net.osmand.aidlapi.map.ALatLon(drop.latitude, drop.longitude),
+                                net.osmand.aidlapi.map.ALatLon(nxt.latitude, nxt.longitude))
+                        }
+                    }
+                    if (trail.size > 120) trail.subList(120, trail.size).clear()
+                }
                 val kmh = (distM / dtS) * 3.6
                 if (kmh <= 250.0) {
                     val alpha = 0.3   // EMA: ~3 ticks until a new speed registers
@@ -206,27 +259,46 @@ class OsmAndNavSource(
             lastVehiclePosAtMs = now
         }
 
-        // 2c. Zoom softly toward the speed-dependent target scale
-        //     (change at most ~2 px/m×100 per tick → no visible jumps).
-        val target = targetScale()
+        // 2c. Zoom in DISCRETE LEVELS (quantized target, hysteresis ±6):
+        //     the continuous EMA-speed target wobbled ±10 km/h and the
+        //     ±2/tick ramp chased it — the window breathed and edge
+        //     streets flickered with every scale step (96 zoom changes
+        //     in 7 min, lm-4.log). Discrete levels only change on real
+        //     speed transitions; between them the window is ROCK STABLE.
+        val target = updateQuantTarget(targetScale())
         val diff = target - dynamicScale
-        dynamicScale = if (kotlin.math.abs(diff) <= 2) target
-                       else dynamicScale + (if (diff > 0) 2 else -2)
-        currentLookaheadM = 240.0 / (dynamicScale / 100.0)
-        if (dynamicScale != lastLoggedScale) {
-            log("osmAnd: zoom: ${"%.0f".format(smoothedSpeedKmh)} km/h → " +
-                "Voraussicht ${"%.0f".format(currentLookaheadM)} m (scale=$dynamicScale)")
-            lastLoggedScale = dynamicScale
+        when {
+            diff != 0 -> zoomTracking = true
+            else -> zoomTracking = false
+        }
+        if (zoomTracking) {
+            // ramp at most ±2 per tick toward the discrete level (no jump)
+            dynamicScale = if (kotlin.math.abs(diff) <= 2) target
+                           else dynamicScale + (if (diff > 0) 2 else -2)
+            currentLookaheadM = 320.0 / (dynamicScale / 100.0)
+            if (dynamicScale != lastLoggedScale) {
+                log("osmAnd: zoom: ${"%.0f".format(smoothedSpeedKmh)} km/h → " +
+                    "Voraussicht ${"%.0f".format(currentLookaheadM)} m (scale=$dynamicScale)")
+                lastLoggedScale = dynamicScale
+            }
         }
 
-        // 3. Pull nearby roads on a background thread (slow: 200-500 ms)
-        //    mapFrame() uses the last-pulled roads; they update one tick late.
-        if (bound && svc != null && navActive && routePoints.isNotEmpty() && !nearbyPulling) {
+        // 3. Pull nearby roads on a background thread. THROTTLED per source:
+        //    the .lmm query is cheap in-memory work (~40 ms) — pull it every
+        //    LMM_INTERVAL_MS (1 s) so the frame's street set stays fresh as
+        //    the window moves; the AIDL fallback is a slow binder call
+        //    (200-500 ms route-index scan) and stays at NEARBY_INTERVAL_MS.
+        val mm = mapManager
+        val interval = if (mm != null && mm.loadedRegions().isNotEmpty())
+                           LMM_INTERVAL_MS else NEARBY_INTERVAL_MS
+        if (bound && svc != null && navActive && routePoints.isNotEmpty() && !nearbyPulling &&
+            System.currentTimeMillis() - lastNearbyPullMs >= interval) {
             nearbyPulling = true
-            Thread {
+            lastNearbyPullMs = System.currentTimeMillis()
+            nearbyExecutor.execute {
                 pullNearbyRoads()
                 nearbyPulling = false
-            }.start()
+            }
         }
     }
 
@@ -251,80 +323,19 @@ class OsmAndNavSource(
         val pts = routePoints
         if (pts.size < 2) {
             // Fallback: straight placeholder from distanceTo, at the current zoom
-            val scale = dynamicScale
-            val pxPerMeter = scale / 100.0
-            val lenPx = (distanceToM * pxPerMeter).toInt().coerceIn(40, 220)
-            val route = listOf(Point(0, 0), Point(0, -lenPx))
-            return MapFrame(
-                seq = seq,
-                flags = MapFrame.FLAG_ROTATE or MapFrame.FLAG_VEHICLE,
-                headingDeg10 = headingDeg10,
-                scalePxPerMeter100 = scale,
-                segments = listOf(Segment(SegmentType.Route, 10, route)),
-            )
+            return FrameBuilder.fallbackFrame(seq, headingDeg10, dynamicScale, distanceToM)
         }
 
-        // Project the polyline to vehicle-relative pixels.
-        // Reference point = first point of the route (= vehicle position).
-        val refLat = pts[0].latitude
-        val refLon = pts[0].longitude
-        val metersPerDegLat = 111_320.0
-        val metersPerDegLon = 111_320.0 * cos(Math.toRadians(refLat))
-
-        val scalePxPerMeter100 = dynamicScale   // speed-adaptive, set in refresh()
-        val pxPerMeter = scalePxPerMeter100 / 100.0
-
-        // Collect all segments: route + nearby roads
-        val segments = ArrayList<Segment>(1 + nearbyRoads.size)
-
-        // Route segment
-        val maxPts = minOf(pts.size, MapFrame.MAX_PTS)
-        val pixelPts = ArrayList<Point>(maxPts)
-        for (i in 0 until maxPts) {
-            val dLat = pts[i].latitude - refLat
-            val dLon = pts[i].longitude - refLon
-            val dNorthM = dLat * metersPerDegLat
-            val dEastM = dLon * metersPerDegLon
-            val px = (dEastM * pxPerMeter).toInt().coerceIn(-260, 260)
-            val py = (-dNorthM * pxPerMeter).toInt().coerceIn(-260, 260)
-            pixelPts.add(Point(px, py))
+        // route + streets through the SHARED FrameBuilder (also used by the
+        // end-to-end preview test — no divergence between test and app)
+        val route = pts.map { LatLon(it.latitude, it.longitude) }
+        val streets = nearbyRoads.map { r ->
+            StreetRoad(r.roadType, r.points.map { LatLon(it.latitude, it.longitude) })
         }
-        segments.add(Segment(SegmentType.Route, 10, pixelPts))
-
-        // Nearby road segments (limit total frame size to MAX_FRAME=4096 bytes)
-        // Each segment = 3 header + pts*4 bytes. Budget: ~3000 B for roads
-        var totalSegs = 1
-        var budgetBytes = 3000
-        for (road in nearbyRoads) {
-            if (totalSegs >= MapFrame.MAX_SEGS || budgetBytes < 83) break  // 83 B = min segment (3 + 20*4)
-            val roadPts = road.points
-            if (roadPts.size < 2) continue
-            val maxRoadPts = minOf(roadPts.size, 20)
-            val rPts = ArrayList<Point>(maxRoadPts)
-            for (i in 0 until maxRoadPts) {
-                val dLat = roadPts[i].latitude - refLat
-                val dLon = roadPts[i].longitude - refLon
-                val dNorthM = dLat * metersPerDegLat
-                val dEastM = dLon * metersPerDegLon
-                val px = (dEastM * pxPerMeter).toInt().coerceIn(-260, 260)
-                val py = (-dNorthM * pxPerMeter).toInt().coerceIn(-260, 260)
-                rPts.add(Point(px, py))
-            }
-            if (rPts.size >= 2) {
-                log("osmAnd: road seg#${totalSegs} type=${road.roadType} pts=${rPts.size} px=(${rPts[0].x},${rPts[0].y})-(${rPts[rPts.size-1].x},${rPts[rPts.size-1].y})")
-                segments.add(Segment(SegmentType.Road, 3, rPts))
-                totalSegs++
-                budgetBytes -= (3 + rPts.size * 4)
-            }
+        val trailSnapshot = synchronized(trail) { ArrayList(trail) }
+        return FrameBuilder.buildFrame(seq, headingDeg10, dynamicScale, route, streets, trailSnapshot) { line ->
+            log("osmAnd: $line")
         }
-
-        return MapFrame(
-            seq = seq,
-            flags = MapFrame.FLAG_ROTATE or MapFrame.FLAG_VEHICLE,
-            headingDeg10 = headingDeg10,  // bearing × 10
-            scalePxPerMeter100 = scalePxPerMeter100,
-            segments = segments,
-        )
     }
 
     override fun batteryPercent(): Int? {
@@ -338,6 +349,9 @@ class OsmAndNavSource(
     @SuppressLint("MissingPermission")
     override fun start() {
         if (bound) return
+        // .lmm vector maps are owned by MapManager (attached via
+        // attachMapManager); if none is attached, side streets fall back
+        // to AIDL. MapManager.loadAll() runs in the MainActivity.
         // V2 service action
         val intent = Intent("net.osmand.aidl.OsmandAidlServiceV2")
         for (pkg in listOf("net.osmand.plus", "net.osmand", "net.osmand.dev")) {
@@ -414,6 +428,7 @@ class OsmAndNavSource(
                     routeVersion = newVersion
                     log("osmAnd: Route-Geometrie: ${result.points.size} Punkte, " +
                         "${result.totalDistanceM} m total, ${result.remainingDistanceM} m rest, v=$newVersion")
+                    checkRouteCoverage(result.points)
                 } else {
                     // Same version but points may have shifted (vehicle moved)
                     routePoints = result.points
@@ -430,16 +445,73 @@ class OsmAndNavSource(
         }
     }
 
-    /** Pull nearby roads from OsmAnd. Called every tick by refresh(). */
-    private fun pullNearbyRoads() {
-        val s = svc ?: run { log("osmAnd: nearby: svc null"); return }
-        val pts = routePoints
-        if (pts.isEmpty()) run { log("osmAnd: nearby: no route points"); return }
+    /** ONE coverage check per new route version: are all route points inside
+     *  loaded .lmm regions? Warn loudly if not — the user must download the
+     *  missing region (or the display falls back to AIDL side streets). */
+    @Volatile private var lastCoverageVersion = Int.MIN_VALUE
+    private fun checkRouteCoverage(points: List<ALatLon>) {
+        if (routeVersion == lastCoverageVersion) return
+        lastCoverageVersion = routeVersion
+        val mm = mapManager ?: return
+        if (mm.loadedRegions().isEmpty()) return   // no maps → AIDL fallback, no warning spam
+        val cov = mm.checkRoute(points.map { it.latitude to it.longitude })
+        if (cov.covered) {
+            log("lmm: Route vollständig abgedeckt (${mm.loadedRegions().size} Regionen)")
+        } else {
+            log("WARNUNG: Keine Kartendaten für die Route bei " +
+                "${"%.4f".format(cov.gapLat)}, ${"%.4f".format(cov.gapLon)} — " +
+                "bitte Region in der App herunterladen! (Straßen via AIDL)")
+        }
+    }
 
-        // Use the first route point (vehicle position) as center
+    /** Pull nearby roads for the current position. PRIMARY: .lmm vector maps
+     *  via MapManager (bbox query in memory, no binder call). FALLBACK: AIDL. */
+    private fun pullNearbyRoads() {
+        val pts = routePoints
+        if (pts.isEmpty()) return
         val centerLat = pts[0].latitude
         val centerLon = pts[0].longitude
 
+        val mm = mapManager
+        val lmmRoads = if (mm != null) {
+            // query ALL loaded regions; the bbox is small, only the region
+            // containing the position returns anything.
+            // Radius = the LARGER visible dimension (AHEAD_PX at the current
+            // scale) plus 10% margin — NOT the lookahead. The window is wider
+            // than the lookahead half; querying only the lookahead made
+            // streets pop in/out mid-screen when they crossed the query edge.
+            val windowM = MapProjector.AHEAD_PX / (dynamicScale / 100.0)
+            val radiusM = windowM * 1.1
+            val dLat = radiusM / 111_320.0
+            val dLon = radiusM / (111_320.0 * cos(Math.toRadians(centerLat)))
+            val roads = ArrayList<LmmRoad>(64)
+            for (m in mm.loadedRegions().values) {
+                roads.addAll(m.queryBbox(centerLat - dLat, centerLon - dLon,
+                                         centerLat + dLat, centerLon + dLon))
+            }
+            roads
+        } else null
+
+        if (lmmRoads != null && lmmRoads.isNotEmpty()) {
+            val out = ArrayList<net.osmand.aidlapi.map.ARoadPolyline>(lmmRoads.size)
+            for (r in lmmRoads) {
+                val poly = net.osmand.aidlapi.map.ARoadPolyline()
+                poly.setRoadType(r.highway)
+                val pl = ArrayList<ALatLon>(r.npts)
+                for (i in 0 until r.npts) pl.add(ALatLon(r.latE7[i] / 1e7, r.lonE7[i] / 1e7))
+                poly.setPoints(pl)
+                out.add(poly)
+            }
+            if (out.size != lastNearbyCount) {
+                log("lmm: ${out.size} Straßen im Fenster (von ${mm!!.loadedRegions().size} Regionen)")
+                lastNearbyCount = out.size
+            }
+            nearbyRoads = out
+            return
+        }
+
+        // FALLBACK: AIDL (no .lmm region covers this position)
+        val s = svc ?: run { log("osmAnd: nearby: svc null"); return }
         try {
             val params = net.osmand.aidlapi.map.NearbyRoadsParams()
             params.setCenterLat(centerLat)
@@ -468,6 +540,19 @@ class OsmAndNavSource(
     @Volatile private var lastNearbyCount: Int = -1
     @Volatile private var nearbyPulling: Boolean = false
     @Volatile private var lastLoggedScale: Int = -1
+    @Volatile private var lastNearbyPullMs: Long = 0
+
+    /** NearbyRoads pull interval — see refresh(). */
+    private companion object {
+        const val NEARBY_INTERVAL_MS = 3000L
+        /** .lmm query interval (in-memory, ~40 ms — much cheaper than AIDL). */
+        const val LMM_INTERVAL_MS = 1000L
+    }
+
+    /** Reusable single-thread executor for the nearby-roads binder calls. */
+    private val nearbyExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "LibreMoto-nearby").apply { priority = Thread.NORM_PRIORITY - 1 }
+    }
 
     /** Equirectangular distance in metres between two lat/lon points. */
     private fun distanceM(a: ALatLon, b: ALatLon): Double {
@@ -540,5 +625,6 @@ class OsmAndNavSource(
         navCallbackId = -1L
         routeCallbackId = -1L
         routePoints = emptyList()
+        synchronized(trail) { trail.clear(); trailMetres = 0.0 }
     }
 }

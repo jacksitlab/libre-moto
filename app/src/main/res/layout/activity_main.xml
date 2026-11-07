@@ -99,6 +99,29 @@
         android:checked="true"
         android:text="Karte (MapData) mit senden" />
 
+    <!-- Vector maps (Geofabrik regions → .lmm) -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btn_maps"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Karten-Regionen …" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/map_status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingTop="4dp"
+        android:text="Karten: —"
+        android:textSize="12sp" />
+
     <View
         android:layout_width="match_parent"
         android:layout_height="1dp"

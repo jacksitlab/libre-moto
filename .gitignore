@@ -47,3 +47,5 @@ firmware/test/test_*
 !firmware/test/*.cpp
 !firmware/test/*.h
 osmand-build
+
+.kilo/

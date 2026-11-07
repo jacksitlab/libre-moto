@@ -37,6 +37,19 @@ android {
     testOptions { unitTests.isReturnDefaultValues = true }
 }
 
+tasks.withType<Test>().configureEach {
+    // The pbf parser test runs with the TABLET's heap budget (256 MB) to
+    // prove the two-pass primitive-array parser doesn't OOM there.
+    maxHeapSize = "256m"
+    // Pass -DrunTour through to the test JVM (TourPreviewTest switch):
+    //   ./gradlew testDebugUnitTest --tests '*TourPreview*' -DrunTour=true
+    systemProperty("runTour", System.getProperty("runTour", "false"))
+    // Viewer mode: explicit coordinates + zoom (TourPreviewTest):
+    //   -DtourStops="52.51933,13.34229" -DtourScale=48
+    systemProperty("tourStops", System.getProperty("tourStops", ""))
+    systemProperty("tourScale", System.getProperty("tourScale", "48"))
+}
+
 dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")

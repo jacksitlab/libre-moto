@@ -10,3 +10,6 @@ local.properties
 # keep the vendorized .aidl/.java sources (they ARE the API contract),
 # but ignore the generated Java stubs Android builds from them.
 src/main/aidl/
+gradle/
+src/test/resources/*.pbf
+src/test/resources/*.lmm

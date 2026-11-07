@@ -15,6 +15,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import de.jacksitlab.libremoto.ble.BleLog
 import de.jacksitlab.libremoto.ble.BleController
+import de.jacksitlab.libremoto.bridge.MapManager
 import de.jacksitlab.libremoto.bridge.NavSource
 import de.jacksitlab.libremoto.bridge.NavSourceFactory
 import de.jacksitlab.libremoto.bridge.SourceKind
@@ -25,6 +26,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var ble: BleController
     private var source: NavSource = NavSourceFactory.create(SourceKind.Mock, this, ::log)
+    private lateinit var mapManager: MapManager
 
     private val main = Handler(Looper.getMainLooper())
     @Volatile private var seq = 0
@@ -37,6 +39,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var streamBtn: Button
     private lateinit var sourceGroup: RadioGroup
     private lateinit var cbMap: CheckBox
+    private lateinit var mapStatus: TextView
 
     companion object {
         const val REQ_PERMS = 42
@@ -55,12 +58,24 @@ class MainActivity : AppCompatActivity() {
 
         ble = BleController(this) { line -> main.post { log(line) } }
 
+        // Vector map manager: loads cached .lmm regions, downloads new ones
+        // from Geofabrik. UI progress goes to the log view.
+        mapManager = MapManager(this,
+            log = { line -> main.post { log(line) } },
+            ui = { line -> main.post { mapStatus.text = line } })
+        mapManager.loadAll()
+        (source as? de.jacksitlab.libremoto.bridge.OsmAndNavSource)?.attachMapManager(mapManager)
+
         bleStatus = findViewById(R.id.ble_status)
         lastPayload = findViewById(R.id.last_payload)
         logView = findViewById(R.id.log)
         streamBtn = findViewById(R.id.btn_stream)
         sourceGroup = findViewById(R.id.source_group)
         cbMap = findViewById(R.id.cb_map)
+        mapStatus = findViewById(R.id.map_status)
+
+        // Karten: Regions-Dialog (Index laden, Download, Löschen)
+        findViewById<Button>(R.id.btn_maps).setOnClickListener { showRegionDialog() }
 
         updateBleStatus()
 
@@ -99,8 +114,55 @@ class MainActivity : AppCompatActivity() {
         source.stop()
         source = NavSourceFactory.create(kind, this, ::log)
         source.start()
+        (source as? de.jacksitlab.libremoto.bridge.OsmAndNavSource)?.attachMapManager(mapManager)
         log("Quelle: $kind — ${source.label}")
         updateBleStatus()
+    }
+
+    // ---- map regions -------------------------------------------------
+    private var regionDialog: android.app.AlertDialog? = null
+
+    private fun showRegionDialog() {
+        val regions = mapManager.regionList()
+        if (regions.isEmpty()) {
+            mapStatus.text = "Lade Geofabrik-Index …"
+            mapManager.fetchIndex { ok ->
+                main.post {
+                    if (ok) showRegionList() else mapStatus.text = "Index-Laden fehlgeschlagen (Netzwerk?)"
+                }
+            }
+        } else {
+            showRegionList()
+        }
+    }
+
+    private fun showRegionList() {
+        val regions = mapManager.regionList()
+        val names = regions.map { r ->
+            val state = if (mapManager.isRegionDownloaded(r.id)) "  ✓" else "  ⬇"
+            r.name + state
+        }.toTypedArray()
+        regionDialog?.dismiss()
+        regionDialog = android.app.AlertDialog.Builder(this)
+            .setTitle("Karten-Regionen (Geofabrik)")
+            .setItems(names) { _, which ->
+                val r = regions[which]
+                if (mapManager.isRegionDownloaded(r.id)) {
+                    android.app.AlertDialog.Builder(this)
+                        .setTitle(r.name)
+                        .setMessage("Region ist geladen. Löschen?")
+                        .setPositiveButton("Löschen") { _, _ -> mapManager.deleteRegion(r.id) }
+                        .setNegativeButton("Abbrechen", null)
+                        .show()
+                } else {
+                    mapStatus.text = "${r.name}: Starte Download …"
+                    mapManager.downloadRegion(r) { ok ->
+                        main.post { if (ok) regionDialog?.dismiss() }
+                    }
+                }
+            }
+            .setNegativeButton("Schließen", null)
+            .show()
     }
 
     private fun ensurePerms(then: () -> Unit) {

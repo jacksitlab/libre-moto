@@ -33,6 +33,23 @@ object Uuid {
 /** Log sink so BleController stays UI-free (unit-test friendly). */
 fun interface BleLog { fun log(line: String) }
 
+/** TX marker bytes: first byte of every queued payload selects the channel.
+ *  CH_GAP is a timing marker, not a write: it keeps a small pause after a
+ *  map frame so the firmware's 500 ms fallback timeout closes the LAST
+ *  frame of a burst (frames before it are closed deterministically by
+ *  the next frame's magic — see map_reassembly.h). */
+private const val CH_NAV = 0x01
+private const val CH_MAP = 0x02
+private const val CH_CTL = 0x03
+private const val CH_GAP = 0x04
+/** Pause after the last map chunk of a frame. The firmware closes frames
+ *  deterministically (magic), so this only bounds the latency of the very
+ *  last frame — 120 ms is plenty and keeps the stream flowing. */
+private const val MAP_GAP_MS = 120L
+/** TX pacing: a write slot is released after this time even when the stack
+ *  never delivers onCharacteristicWrite (proven on the test tablet). */
+private const val TX_PACE_MS = 40L
+
 class BleController(private val context: Context, log: (String) -> Unit) {
     /** Log line sink (UI-free, test-friendly). In the app this sink is wired to
      *  MainActivity.log, which mirrors every line to logcat (tag "LibreMoto"),
@@ -59,17 +76,36 @@ class BleController(private val context: Context, log: (String) -> Unit) {
     // ---- serialized TX queue -------------------------------------------
     // Android BLE allows exactly ONE writeCharacteristic in flight; a second
     // call while one is pending returns false and the payload is silently
-    // dropped. NavData ticks (main loop) and map chunks (postDelayed pump) used
-    // to collide exactly there — visible as stutter once the app is backgrounded.
-    // Every write now goes through this queue: send next only after
-    // onCharacteristicWrite of the previous one fired (callback-driven, no gaps).
+    // dropped. Every write goes through this queue: send next only after
+    // onCharacteristicWrite of the previous one fired.
+    //
+    // MAP GAP: the firmware closes a MapData frame only after 500 ms WITHOUT a
+    // new map chunk (ble_link.h reassembly — no length prefix, no delimiter).
+    // Chunks of consecutive frames must therefore NEVER arrive back-to-back,
+    // or the firmware concatenates both frames into one buffer and the strict
+    // parser drops the result (display freeze). sendMap() enqueues a CH_GAP
+    // marker after the last chunk; pumpTx() holds it (and everything behind
+    // it) until MAP_GAP_MS passed since the last map write. Nav/ctl writes
+    // are small and 1 Hz — the occasional delay is invisible.
     private object Tx {
         val queue = java.util.concurrent.ConcurrentLinkedQueue<ByteArray>()
-        @Volatile var busy = false            // one write in flight
+        @Volatile var busy = false            // one write in flight (pacing slot)
+        @Volatile var busySinceMs = 0L        // pacing reference
+        @Volatile var writeCbs = 0L           // onCharacteristicWrite received
+        @Volatile var pacedWrites = 0L        // writes released by the 40 ms timer
         @Volatile var active = false         // set once the GATT link is usable
     }
     @Volatile private var droppedMaps = 0L
     @Volatile private var lastMapDropLog = 0L
+    @Volatile private var lastMapWriteAtMs = 0L
+
+    /** Dedicated TX thread (pacing + gap timing). NOT the main looper:
+     *  pumpTx() is @Synchronized and shared with the pump thread and the BLE
+     *  binder callbacks — if the UI thread ever waits for that lock (it did,
+     *  via a main-looper Handler: the Stream button became unresponsive),
+     *  the whole app freezes. */
+    private val txThread = android.os.HandlerThread("LibreMoto-tx").apply { start() }
+    private val gapHandler = android.os.Handler(txThread.looper)
 
     /** Thread-safe: queues a raw payload and pumps if idle. */
     private fun enqueue(data: ByteArray) {
@@ -78,40 +114,94 @@ class BleController(private val context: Context, log: (String) -> Unit) {
         pumpTx()
     }
 
-    /** Sends the head of the queue if no write is in flight. Called from
-     *  enqueue() and from onCharacteristicWrite (queue head advanced).
-     *  Synchronized: enqueue runs on the pump thread, the write callback
-     *  arrives on a binder thread — both may pump concurrently. */
+    /** Sends the head of the queue — PACING-FIRST, not callback-first.
+     *
+     *  The log proved this tablet never delivers onCharacteristicWrite for
+     *  our characteristics (queue grew monotonically, zero callbacks, zero
+     *  watchdog fires). A pipeline that WAITS for the callback stalls on
+     *  such a stack. So the TX thread releases a write slot every
+     *  TX_PACE_MS on its own; an arriving callback only releases the slot
+     *  EARLY (bonus throughput on stacks that do deliver it).
+     *
+     *  This is safe even without callbacks: 40 ms ≫ the ~10-15 ms a
+     *  Write-Without-Response needs in the stack — the same pacing the
+     *  original code used when frames DID flow. */
     @Synchronized
     private fun pumpTx() {
-        if (Tx.busy) return
-        val data = Tx.queue.poll() ?: return
-        val g = gatt.get() ?: run { clearTx("gatt weg"); return }
-        val c = when (data[0].toInt() and 0xFF) {
-            0x01 -> chNav    // NAV marker byte (see sendNavData)
-            0x02 -> chMap    // MAP marker byte (see sendMap)
-            else -> chCtl    // CTL
-        } ?: run { clearTx("channel weg"); return }
-        Tx.busy = true
-        try {
-            c.value = data.copyOfRange(1, data.size)
-            @Suppress("DEPRECATION")
-            val ok = g.writeCharacteristic(c)
-            if (!ok) { Tx.busy = false; log("tx: writeCharacteristic abgelehnt — Chunk verworfen") }
-        } catch (e: SecurityException) {
-            Tx.busy = false
-            log("tx: fehlende Berechtigung")
-        } catch (e: Exception) {
-            Tx.busy = false
-            log("tx: ${e.javaClass.simpleName}: ${e.message}")
+        if (!Tx.active) { clearTx("inaktiv"); return }
+        while (true) {
+            if (Tx.busy) {
+                val since = System.currentTimeMillis() - Tx.busySinceMs
+                if (since >= TX_PACE_MS) {
+                    Tx.busy = false
+                    Tx.pacedWrites++
+                } else {
+                    gapHandler.postDelayed({ pumpTx() }, TX_PACE_MS - since)
+                    return
+                }
+            }
+            val data = Tx.queue.peek() ?: return
+            when (data[0].toInt() and 0xFF) {
+                CH_GAP -> {
+                    // small pause after a map frame (firmware fallback timeout)
+                    val since = System.currentTimeMillis() - lastMapWriteAtMs
+                    if (since < MAP_GAP_MS) {
+                        gapHandler.postDelayed({ pumpTx() }, MAP_GAP_MS - since)
+                        return
+                    }
+                    Tx.queue.poll()          // gap elapsed — consume marker
+                }
+                else -> {
+                    val g = gatt.get() ?: run { clearTx("gatt weg"); return }
+                    val c = when (data[0].toInt() and 0xFF) {
+                        CH_NAV -> chNav
+                        CH_MAP -> chMap
+                        else -> chCtl
+                    } ?: run { clearTx("channel weg"); return }
+                    Tx.queue.poll()   // CONSUME the head — peek() alone made the
+                                      // TX thread rewrite the same item forever
+                    Tx.busy = true
+                    Tx.busySinceMs = System.currentTimeMillis()
+                    try {
+                        c.value = data.copyOfRange(1, data.size)
+                        @Suppress("DEPRECATION")
+                        val ok = g.writeCharacteristic(c)
+                        if (!ok) {
+                            Tx.busy = false
+                            log("tx: writeCharacteristic abgelehnt — Chunk verworfen")
+                            return
+                        }
+                        if (data[0].toInt() and 0xFF == CH_MAP) {
+                            lastMapWriteAtMs = System.currentTimeMillis()
+                        }
+                    } catch (e: SecurityException) {
+                        Tx.busy = false
+                        log("tx: fehlende Berechtigung")
+                    } catch (e: Exception) {
+                        Tx.busy = false
+                        log("tx: ${e.javaClass.simpleName}: ${e.message}")
+                    }
+                    return   // slot busy; timer or callback releases it
+                }
+            }
         }
     }
 
-    /** onCharacteristicWrite → advance. */
+    /** onCharacteristicWrite → release the pacing slot EARLY (stacks that
+     *  deliver callbacks get bonus throughput; those that don't rely on
+     *  the TX_PACE_MS timer and lose nothing). */
     private fun onWriteDone(ok: Boolean) {
-        Tx.busy = false
+        if (!ok) log("tx: write status != 0")
+        if (Tx.busy) {
+            Tx.writeCbs++
+            Tx.busy = false
+        }
         pumpTx()
     }
+
+    /** Diagnostics for the log: how writes were released. */
+    fun txStats(): String =
+        "tx: cbs=${Tx.writeCbs} paced=${Tx.pacedWrites} queue=${Tx.queue.size}"
 
     /** Drops everything queued (disconnect, missing channels). */
     private fun clearTx(reason: String) {
@@ -276,7 +366,7 @@ class BleController(private val context: Context, log: (String) -> Unit) {
             return
         }
         log("TX nav  (${payload.size}B): $json")
-        enqueue(byteArrayOf(0x01) + payload)
+        enqueue(byteArrayOf(CH_NAV.toByte()) + payload)
     }
 
     @SuppressLint("MissingPermission")
@@ -287,7 +377,7 @@ class BleController(private val context: Context, log: (String) -> Unit) {
             return
         }
         log("TX ctl  (${payload.size}B): $json")
-        enqueue(byteArrayOf(0x03) + payload)
+        enqueue(byteArrayOf(CH_CTL.toByte()) + payload)
     }
 
     /** Sends a binary MapFrame (F004), chunked to fit MTU. Chunks are queued
@@ -314,16 +404,35 @@ class BleController(private val context: Context, log: (String) -> Unit) {
         }
         val n = (frame.size + chunk - 1) / chunk
         log("TX map  (${frame.size}B, $n Chunks)")
-        for (i in 0 until n) {
-            val off = i * chunk
-            val piece = frame.copyOfRange(off, minOf(off + chunk, frame.size))
-            enqueue(byteArrayOf(0x02) + piece)
+        // Precompute magic-safe chunk boundaries: no continuation chunk may
+        // start with 4C 4D 01 (would falsely close the frame at the firmware —
+        // sender contract, map_reassembly.h).
+        val bounds = ArrayList<Int>()
+        bounds.add(0)
+        var b = chunk
+        while (b < frame.size) {
+            if (frame.size - b >= 3 &&
+                frame[b] == 0x4C.toByte() && frame[b + 1] == 0x4D.toByte() && frame[b + 2] == 0x01.toByte()) {
+                b += 1   // shift boundary so the magic stays inside a chunk
+            }
+            bounds.add(b)
+            b += chunk
         }
+        bounds.add(frame.size)
+        for (i in 0 until bounds.size - 1) {
+            val s = bounds[i]
+            val e = bounds[i + 1]
+            enqueue(byteArrayOf(CH_MAP.toByte()) + frame.copyOfRange(s, e))
+        }
+        // gap marker: short pause so the firmware's 500 ms fallback closes
+        // the last frame of the burst (earlier frames close via magic)
+        enqueue(byteArrayOf(CH_GAP.toByte()))
     }
 
     fun disconnect() {
         Tx.active = false
         clearTx("disconnect")
+        gapHandler.removeCallbacksAndMessages(null)   // drop pending timers
         gatt.get()?.let { g ->
             try { g.disconnect() } catch (e: Exception) {}
             g.close()
