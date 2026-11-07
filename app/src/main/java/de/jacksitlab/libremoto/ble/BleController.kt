@@ -57,6 +57,9 @@ class BleController(private val context: Context, log: (String) -> Unit) {
     private val log: (String) -> Unit = log
     private val gatt = java.util.concurrent.atomic.AtomicReference<android.bluetooth.BluetoothGatt>()
     @Volatile var connected = false; private set
+    /** Notified on connect AND disconnect (main thread). The UI subscribes
+     *  to drive its auto-connect/auto-stream behaviour. */
+    @Volatile var onConnectionChanged: ((Boolean) -> Unit)? = null
     @Volatile var mtu = 23; private set
     @Volatile var mapChunk = 20; private set
 
@@ -229,6 +232,7 @@ class BleController(private val context: Context, log: (String) -> Unit) {
                 }
                 android.bluetooth.BluetoothProfile.STATE_DISCONNECTED -> {
                     connected = false
+                    onConnectionChanged?.invoke(false)
                     clearTx("Verbindung getrennt")
                     log("Getrennt (status=$status)")
                     g.close()
@@ -263,6 +267,7 @@ class BleController(private val context: Context, log: (String) -> Unit) {
             chMap = svc.getCharacteristic(Uuid.MAP)
             chCtl = svc.getCharacteristic(Uuid.CTL)
             connected = true
+            onConnectionChanged?.invoke(true)
             if (mtu < 100) {
                 // MTU negotiation failed earlier — map chunks stay small (20 B)
                 // and a NavData JSON may not fit. Log loudly once.
@@ -309,21 +314,38 @@ class BleController(private val context: Context, log: (String) -> Unit) {
         }
     }
     // ---- scans -----------------------------------------------------
+    /** The ONE active scan callback (null = no scan running). startScan
+     *  stops any previous scan first — repeated retries used to LEAK
+     *  parallel scans (scannerIds 8..13 in the logcat), and Android blocks
+     *  the app after 5 concurrent scans. */
+    @Volatile private var activeScan: android.bluetooth.le.ScanCallback? = null
+
+    @SuppressLint("MissingPermission")
+    fun stopScan() {
+        val a = adapter ?: return
+        activeScan?.let { cb ->
+            try { a.bluetoothLeScanner.stopScan(cb) } catch (_: Exception) {}
+            activeScan = null
+        }
+    }
+
     @SuppressLint("MissingPermission")
     fun startScan(onFound: (name: String, address: String) -> Unit) {
         val a = adapter
         if (a == null) { log("BLE: kein Adapter"); return }
         if (!a.isEnabled) { log("BLE: erst einschalten"); return }
+        stopScan()   // never two scans at once
         try {
             val cb = object : android.bluetooth.le.ScanCallback() {
                 override fun onScanResult(type: Int, res: android.bluetooth.le.ScanResult) {
                     val name = res.scanRecord?.deviceName ?: res.device.name
                     if (name == Uuid.NAME) {
-                        a.bluetoothLeScanner.stopScan(this)
+                        stopScan()
                         onFound(name, res.device.address)
                     }
                 }
             }
+            activeScan = cb
             a.bluetoothLeScanner.startScan(cb)
             log("Suche: „${Uuid.NAME}“ …")
         } catch (e: SecurityException) {

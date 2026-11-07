@@ -16,7 +16,11 @@ android {
         minSdk = 29
         targetSdk = 34
         versionCode = 1
-        versionName = "0.1.0"
+        // Build stamp: git describe at build time — visible on the start
+        // screen (BuildStamp.ID) so a stale install is instantly obvious.
+        versionName = providers.exec {
+            commandLine("git", "describe", "--always", "--dirty")
+        }.standardOutput.asText.get().trim()
     }
 
     buildTypes {

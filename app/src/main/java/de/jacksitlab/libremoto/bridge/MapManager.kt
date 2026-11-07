@@ -28,11 +28,13 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.Executors
 
-/** One Geofabrik region from the index. */
+/** One Geofabrik region from the index. parentId builds the hierarchy
+ *  (continent → country → state); null = top level (continent). */
 data class GeofabrikRegion(
     val id: String,
     val name: String,
     val pbfUrl: String,
+    val parentId: String?,
     val minLat: Double, val minLon: Double,
     val maxLat: Double, val maxLon: Double,
 )
@@ -100,7 +102,10 @@ class MapManager(
                         }
                     }
                     f.optJSONObject("geometry")?.let { scanCoords(it) }
-                    out[gid] = GeofabrikRegion(gid, name, pbf, minLat, minLon, maxLat, maxLon)
+                    // hierarchy: "parent" names the containing region
+                    // (e.g. brandenburg → germany, germany → europe)
+                    val parentId = if (p.has("parent")) p.optString("parent") else null
+                    out[gid] = GeofabrikRegion(gid, name, pbf, parentId, minLat, minLon, maxLat, maxLon)
                 }
                 regions = out
                 log("maps: ${out.size} Geofabrik-Regionen im Index")
@@ -114,23 +119,125 @@ class MapManager(
 
     fun regionList(): List<GeofabrikRegion> = regions.values.sortedBy { it.name }
 
+    /** Region by id (null if unknown). */
+    fun region(id: String): GeofabrikRegion? = regions[id]
+
+    /** Hierarchy: children of the given parent (null = top level,
+     *  the continents). Sorted by name. */
+    fun childRegions(parentId: String?): List<GeofabrikRegion> =
+        regions.values.filter { it.parentId == parentId }.sortedBy { it.name }
+
+    /** Hierarchy: does this region have children (a country with states)? */
+    fun hasChildren(id: String): Boolean = regions.values.any { it.parentId == id }
+
+    /** Installed regions (with their index entry if the index is loaded). */
+    fun installedRegions(): List<GeofabrikRegion> =
+        mapsDir.listFiles { f -> f.name.endsWith(".lmm") }
+            ?.mapNotNull { f -> regions[f.name.removeSuffix(".lmm")] }
+            ?: emptyList()
+
+    /** All installed region ids — even if the index is not loaded yet. */
+    fun installedIds(): List<String> =
+        mapsDir.listFiles { f -> f.name.endsWith(".lmm") }
+            ?.map { it.name.removeSuffix(".lmm") } ?: emptyList()
+
+    // ------------------------------------------------- region metadata (.meta)
+
+    /** Persisted metadata for one installed region (JSON next to the .lmm):
+     *  { "md5": "<geofabrik pbf md5 at download time>", "date": <epoch ms>,
+     *    "bytes": <lmm size> }. The md5 enables UPDATE detection: Geofabrik
+     *  publishes a .md5 next to every .osm.pbf; when it changes, the
+     *  upstream data changed → re-download + re-convert. */
+    private fun metaFile(regionId: String) = File(mapsDir, "$regionId.meta")
+
+    fun readMeta(regionId: String): JSONObject? = try {
+        if (metaFile(regionId).exists())
+            JSONObject(metaFile(regionId).readText()) else null
+    } catch (_: Exception) { null }
+
+    private fun writeMeta(regionId: String, md5: String?, bytes: Long) {
+        try {
+            val o = JSONObject()
+            o.put("md5", md5 ?: JSONObject.NULL)
+            o.put("date", System.currentTimeMillis())
+            o.put("bytes", bytes)
+            metaFile(regionId).writeText(o.toString())
+        } catch (e: Exception) { log("maps: Meta-Schreibfehler $regionId: ${e.message}") }
+    }
+
+    /** Installed .lmm size in bytes (0 if missing). */
+    fun regionBytes(regionId: String): Long =
+        File(mapsDir, "$regionId.lmm").takeIf { it.exists() }?.length() ?: 0L
+
+    /** Fetch Geofabrik's CURRENT md5 for a region's pbf (network).
+     *  Returns null on any failure (offline, 404 …). Executor thread. */
+    fun fetchCurrentMd5(region: GeofabrikRegion, onDone: (String?) -> Unit) {
+        executor.execute {
+            val md5 = try {
+                val txt = httpGet(region.pbfUrl + ".md5").trim()
+                // file format: "<hash>  <filename>"
+                txt.splitWhitespace().firstOrNull { it.length == 32 }?.lowercase()
+            } catch (_: Exception) { null }
+            onDone(md5)
+        }
+    }
+
+    /** Check ALL installed regions for updates (one md5 request each,
+     *  sequential on the executor). onResult per region:
+     *  (regionId, upToDate: Boolean?) — null = unknown (offline/404). */
+    fun checkUpdates(onResult: (String, Boolean?) -> Unit, onAllDone: () -> Unit) {
+        executor.execute {
+            for (id in installedIds()) {
+                val region = regions[id] ?: continue
+                val stored = readMeta(id)?.optString("md5", null)
+                val current = try {
+                    val txt = httpGet(region.pbfUrl + ".md5").trim()
+                    txt.splitWhitespace().firstOrNull { it.length == 32 }?.lowercase()
+                } catch (_: Exception) { null }
+                val upToDate = when {
+                    current == null -> null                  // unknown
+                    stored.isNullOrBlank() -> false         // no stored hash → outdated metadata
+                    else -> current == stored.lowercase()
+                }
+                onResult(id, upToDate)
+            }
+            onAllDone()
+        }
+    }
+
+    private fun String.splitWhitespace(): List<String> =
+        split(' ', '\t', '\r', '\n').filter { it.isNotBlank() }
+
     // --------------------------------------------------------------- download
 
-    /** Download + convert a region (network + CPU). Executor thread. */
-    fun downloadRegion(region: GeofabrikRegion, onDone: (Boolean) -> Unit) {
+    /** Download + convert a region (network + CPU). Executor thread.
+     *  progress: (phase, percent) — phase 0 = download, 1 = convert. */
+    fun downloadRegion(region: GeofabrikRegion, onDone: (Boolean) -> Unit,
+                       progress: ((Int, Int) -> Unit)? = null) {
         executor.execute {
             val target = File(mapsDir, "${region.id}.lmm")
             try {
                 ui("Lade ${region.name} …")
                 val tmp = File(context.cacheDir, "${region.id}.osm.pbf")
+                // Geofabrik's md5 for the pbf — stored in .meta for UPDATE
+                // detection (checkUpdates compares it later)
+                val md5 = try {
+                    val txt = httpGet(region.pbfUrl + ".md5").trim()
+                    txt.splitWhitespace().firstOrNull { it.length == 32 }?.lowercase()
+                } catch (_: Exception) { null }
                 httpDownload(region.pbfUrl, tmp) { done, total ->
+                    val pct = if (total > 0) (done * 100 / total).toInt() else 0
                     ui("Lade ${region.name}: ${done / 1048576} / ${total / 1048576} MB")
+                    progress?.invoke(0, pct)
                 }
                 ui("Konvertiere ${region.name} …")
+                progress?.invoke(1, 0)
                 val t0 = System.currentTimeMillis()
                 val res = OsmPbfReader.scan(tmp)
                 val built = LmmBuilder.build(res)
+                progress?.invoke(1, 100)
                 FileOutputStream(target).use { it.write(built.bytes) }
+                writeMeta(region.id, md5, built.bytes.size.toLong())
                 tmp.delete()
                 ui("${region.name}: ${built.roadCount} Straßen, " +
                    "${built.bytes.size / 1048576} MB — fertig " +

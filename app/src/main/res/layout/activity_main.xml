@@ -1,217 +1,114 @@
 <?xml version="1.0" encoding="utf-8"?>
-
-
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:clipToPadding="false"
     android:orientation="vertical"
     android:padding="16dp">
 
-    <!-- BLE status -->
+    <!-- Logo oben + Menü-Button (⋮) rechts — in einem FrameLayout -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+        <ImageView
+            android:id="@+id/logo"
+            android:layout_width="204dp"
+            android:layout_height="80dp"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginTop="8dp"
+            android:contentDescription="LibreMoto"
+            android:src="@drawable/logo" />
+
+        <!-- Overflow-Menü als simpler Text-Button (⋮): folgt der
+             Theme-Textfarbe, ist auf jedem Gerät sichtbar — die
+             Toolbar-Variante zeigte auf Samsung nur den Titel,
+             aber keine drei Punkte. -->
+        <TextView
+            android:id="@+id/menu_btn"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_gravity="top|end"
+            android:background="?android:attr/selectableItemBackground"
+            android:contentDescription="Menü"
+            android:gravity="center"
+            android:text="⋮"
+            android:textSize="26sp" />
+    </FrameLayout>
+
+    <!-- Verbindungsstatus -->
     <TextView
         android:id="@+id/ble_status"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="BLE: —"
-        android:textSize="16sp"
+        android:layout_marginTop="24dp"
+        android:gravity="center"
+        android:text="Verbinde …"
+        android:textSize="18sp"
         android:textStyle="bold" />
 
-    <View
-        android:layout_width="match_parent"
-        android:layout_height="1dp"
-        android:layout_marginTop="12dp"
-        android:layout_marginBottom="12dp"
-        android:background="#00000022" />
-
-    <!-- BLE controls -->
-    <Button
-        android:id="@+id/btn_connect"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Suchen &amp; Verbinden" />
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:orientation="horizontal">
-
-        <Button
-            android:id="@+id/btn_read_status"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="Status" />
-
-        <Space
-            android:layout_width="8dp"
-            android:layout_height="1dp" />
-
-        <Button
-            android:id="@+id/btn_disconnect"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="Trennen" />
-    </LinearLayout>
-
-    <View
-        android:layout_width="match_parent"
-        android:layout_height="1dp"
-        android:layout_marginTop="12dp"
-        android:layout_marginBottom="12dp"
-        android:background="#00000022" />
-
-    <!-- Nav source -->
     <TextView
+        android:id="@+id/ble_detail"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:paddingBottom="6dp"
-        android:text="Nav-Quelle"
-        android:textSize="14sp"
-        android:textStyle="bold" />
+        android:gravity="center"
+        android:text=""
+        android:textSize="12sp" />
 
-    <RadioGroup
-        android:id="@+id/source_group"
-        android:layout_width="match_parent"
+    <Button
+        android:id="@+id/btn_retry"
+        android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:orientation="vertical">
+        android:layout_gravity="center_horizontal"
+        android:layout_marginTop="16dp"
+        android:minWidth="200dp"
+        android:text="Erneut versuchen"
+        android:visibility="gone" />
 
-        <RadioButton
-            android:id="@+id/rb_mock"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:checked="true"
-            android:text="Demo-Route (Mock)" />
-
-        <RadioButton
-            android:id="@+id/rb_osmand"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="osmAnd (AIDL)" />
-    </RadioGroup>
-
-    <CheckBox
-        android:id="@+id/cb_map"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:checked="true"
-        android:text="Karte (MapData) mit senden" />
-
-    <!-- Vector maps (Geofabrik regions → .lmm) -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:orientation="horizontal">
-
-        <Button
-            android:id="@+id/btn_maps"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="Karten-Regionen …" />
-    </LinearLayout>
-
+    <!-- Status der Karten/Route unten, dezent -->
     <TextView
         android:id="@+id/map_status"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:paddingTop="4dp"
-        android:text="Karten: —"
+        android:layout_marginTop="24dp"
+        android:gravity="center"
+        android:text=""
         android:textSize="12sp" />
 
-    <View
+    <Space
         android:layout_width="match_parent"
-        android:layout_height="1dp"
-        android:layout_marginTop="12dp"
-        android:layout_marginBottom="12dp"
-        android:background="#00000022" />
+        android:layout_height="0dp"
+        android:layout_weight="1" />
 
-    <!-- Send controls -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal">
-
-        <Button
-            android:id="@+id/btn_send_nav"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="Nav + Map senden" />
-
-        <Space
-            android:layout_width="8dp"
-            android:layout_height="1dp" />
-
-        <Button
-            android:id="@+id/btn_beep"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="Heartbeat" />
-    </LinearLayout>
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:orientation="horizontal">
-
-        <Button
-            android:id="@+id/btn_stream"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="Stream ✕" />
-
-        <Space
-            android:layout_width="8dp"
-            android:layout_height="1dp" />
-
-        <Button
-            android:id="@+id/btn_idle"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="Board → Idle" />
-    </LinearLayout>
-
+    <!-- Log (Klapptext, default zu) -->
     <TextView
-        android:id="@+id/last_payload"
+        android:id="@+id/log_toggle"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:fontFamily="monospace"
-        android:text="letzte Sendung: —"
+        android:padding="8dp"
+        android:text="Log ▸"
         android:textSize="12sp" />
-
-    <!-- Log -->
-    <View
-        android:layout_width="match_parent"
-        android:layout_height="1dp"
-        android:layout_marginTop="12dp"
-        android:layout_marginBottom="8dp"
-        android:background="#00000022" />
-
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:paddingBottom="4dp"
-        android:text="Log"
-        android:textSize="14sp"
-        android:textStyle="bold" />
 
     <TextView
         android:id="@+id/log"
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
+        android:layout_height="wrap_content"
         android:background="#00000011"
         android:fontFamily="monospace"
         android:gravity="bottom"
+        android:maxHeight="200dp"
         android:padding="8dp"
-        android:textSize="12sp" />
+        android:textSize="11sp"
+        android:visibility="gone" />
+
+    <!-- Build-Stempel: sofort erkennbar, welcher Stand installiert ist -->
+    <TextView
+        android:id="@+id/build_id"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:paddingTop="4dp"
+        android:text=""
+        android:textColor="#888888"
+        android:textSize="10sp" />
 
 </LinearLayout>

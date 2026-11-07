@@ -25,6 +25,7 @@
     </queries>
 
     <application
+        android:name=".LibreMotoApp"
         android:label="@string/app_name"
         android:icon="@drawable/ic_launcher"
         android:roundIcon="@drawable/ic_launcher_round"
@@ -40,6 +41,11 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".MapsActivity"
+            android:exported="false"
+            android:parentActivityName=".MainActivity" />
 
         <service
             android:name=".StreamService"

@@ -1,48 +1,45 @@
 package de.jacksitlab.libremoto
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.View
+
+
 import android.widget.Button
-import android.widget.CheckBox
-import android.widget.RadioButton
-import android.widget.RadioGroup
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import de.jacksitlab.libremoto.ble.BleLog
 import de.jacksitlab.libremoto.ble.BleController
-import de.jacksitlab.libremoto.bridge.MapManager
-import de.jacksitlab.libremoto.bridge.NavSource
 import de.jacksitlab.libremoto.bridge.NavSourceFactory
 import de.jacksitlab.libremoto.bridge.SourceKind
-import de.jacksitlab.libremoto.protocol.NavData
-import de.jacksitlab.libremoto.protocol.NavType
 
+/** Minimalist start screen: logo, connection status, auto-connect.
+ *  Everything else lives in the menu (maps view, log) — no manual
+ *  send/stream buttons: the stream starts automatically once BLE is
+ *  connected and OsmAnd navigation is active. */
 class MainActivity : AppCompatActivity() {
 
     private lateinit var ble: BleController
-    private var source: NavSource = NavSourceFactory.create(SourceKind.Mock, this, ::log)
-    private lateinit var mapManager: MapManager
+    private lateinit var bleStatus: TextView
+    private lateinit var bleDetail: TextView
+    private lateinit var retryBtn: Button
+    private lateinit var mapStatus: TextView
+    private lateinit var logView: TextView
+    private lateinit var logToggle: TextView
+    private var logVisible = false
 
     private val main = Handler(Looper.getMainLooper())
-    @Volatile private var seq = 0
-    private var streaming = false
-    private val streamTimer = main
-
-    private lateinit var bleStatus: TextView
-    private lateinit var lastPayload: TextView
-    private lateinit var logView: TextView
-    private lateinit var streamBtn: Button
-    private lateinit var sourceGroup: RadioGroup
-    private lateinit var cbMap: CheckBox
-    private lateinit var mapStatus: TextView
+    private var connectAttempts = 0
+    private var retryRunnable: Runnable? = null
 
     companion object {
         const val REQ_PERMS = 42
+        const val CONNECT_TIMEOUT_MS = 15_000L
         val PERMS = if (android.os.Build.VERSION.SDK_INT >= 31)
             arrayOf(
                 Manifest.permission.BLUETOOTH_SCAN,
@@ -52,212 +49,170 @@ class MainActivity : AppCompatActivity() {
             arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
     }
 
+    private val logListener: (String) -> Unit = { line -> renderLog(line) }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        ble = BleController(this) { line -> main.post { log(line) } }
-
-        // Vector map manager: loads cached .lmm regions, downloads new ones
-        // from Geofabrik. UI progress goes to the log view.
-        mapManager = MapManager(this,
-            log = { line -> main.post { log(line) } },
-            ui = { line -> main.post { mapStatus.text = line } })
-        mapManager.loadAll()
-        (source as? de.jacksitlab.libremoto.bridge.OsmAndNavSource)?.attachMapManager(mapManager)
+        ble = BleController(this) { line -> AppLog.append(line) }
 
         bleStatus = findViewById(R.id.ble_status)
-        lastPayload = findViewById(R.id.last_payload)
-        logView = findViewById(R.id.log)
-        streamBtn = findViewById(R.id.btn_stream)
-        sourceGroup = findViewById(R.id.source_group)
-        cbMap = findViewById(R.id.cb_map)
+        bleDetail = findViewById(R.id.ble_detail)
+        retryBtn = findViewById(R.id.btn_retry)
         mapStatus = findViewById(R.id.map_status)
+        logView = findViewById(R.id.log)
+        logToggle = findViewById(R.id.log_toggle)
 
-        // Karten: Regions-Dialog (Index laden, Download, Löschen)
-        findViewById<Button>(R.id.btn_maps).setOnClickListener { showRegionDialog() }
+        retryBtn.setOnClickListener { autoConnect() }
+        logToggle.setOnClickListener { toggleLog() }
 
-        updateBleStatus()
-
-        ensurePerms {
-            findViewById<Button>(R.id.btn_connect).setOnClickListener { findAndConnect() }
-            findViewById<Button>(R.id.btn_read_status).setOnClickListener {
-                ble.readStatus()
-            }
-            findViewById<Button>(R.id.btn_disconnect).setOnClickListener { ble.disconnect(); updateBleStatus() }
-            findViewById<Button>(R.id.btn_send_nav).setOnClickListener { sendOnce() }
-            findViewById<Button>(R.id.btn_beep).setOnClickListener {
-                ble.sendNavData(NavData(NavType.Beep).toJson())
-                lastPayload.text = "beep"
-            }
-            streamBtn.setOnClickListener { toggleStream() }
-            findViewById<Button>(R.id.btn_idle).setOnClickListener {
-                ble.sendControl("{\"state\":\"idle\"}")
-                stopStream()
-            }
-
-            sourceGroup.setOnCheckedChangeListener { _: RadioGroup?, id: Int ->
-                val kind = if (id == R.id.rb_osmand) SourceKind.OsmAnd else SourceKind.Mock
-                switchSource(kind)
-            }
-        }
-    }
-
-    private fun updateBleStatus() {
-        main.post {
-            bleStatus.text = if (ble.isReady) "BLE: verbunden" else ble.adapterState()
-        }
-    }
-
-    private fun switchSource(kind: SourceKind) {
-        stopStream()
-        source.stop()
-        source = NavSourceFactory.create(kind, this, ::log)
-        source.start()
-        (source as? de.jacksitlab.libremoto.bridge.OsmAndNavSource)?.attachMapManager(mapManager)
-        log("Quelle: $kind — ${source.label}")
-        updateBleStatus()
-    }
-
-    // ---- map regions -------------------------------------------------
-    private var regionDialog: android.app.AlertDialog? = null
-
-    private fun showRegionDialog() {
-        val regions = mapManager.regionList()
-        if (regions.isEmpty()) {
-            mapStatus.text = "Lade Geofabrik-Index …"
-            mapManager.fetchIndex { ok ->
-                main.post {
-                    if (ok) showRegionList() else mapStatus.text = "Index-Laden fehlgeschlagen (Netzwerk?)"
+        // Menü (⋮) oben rechts: klassisches PopupMenu — deterministisch
+        // sichtbar, unabhängig vom Theme (Toolbar zeigte auf Samsung nur
+        // den Titel, keine drei Punkte).
+        findViewById<TextView>(R.id.menu_btn).setOnClickListener { anchor ->
+            val pm = android.widget.PopupMenu(this, anchor)
+            pm.menuInflater.inflate(R.menu.menu_main, pm.menu)
+            pm.setOnMenuItemClickListener { item ->
+                when (item.itemId) {
+                    R.id.menu_maps -> { startActivity(Intent(this, MapsActivity::class.java)); true }
+                    R.id.menu_log -> { toggleLog(); true }
+                    else -> false
                 }
             }
+            pm.show()
+        }
+
+        // Build stamp: which code is installed? (git describe at build time)
+        findViewById<TextView>(R.id.build_id).text = BuildStamp.id(this)
+
+        // connection state → UI
+        ble.onConnectionChanged = { connected ->
+            main.post {
+                renderConnection(connected)
+                if (!connected && StreamService.running) {
+                    StreamService.stop(this)
+                }
+            }
+        }
+
+        ensurePerms()
+        AppLog.subscribe(logListener)
+        autoConnect()
+    }
+
+    // ---- connection -------------------------------------------------
+
+    private fun autoConnect() {
+        // cancel any pending retry — one connect cycle at a time
+        retryRunnable?.let { main.removeCallbacks(it) }
+        retryRunnable = null
+        connectAttempts++
+        retryBtn.visibility = View.GONE
+        bleStatus.text = "Suche LibreMoto-Display …"
+        bleDetail.text = "Versuch $connectAttempts"
+        ble.startScan { _, address ->
+            main.post {
+                bleStatus.text = "Verbinde …"
+                ble.connect(address)
+            }
+        }
+        // timeout: no connection after N s → retry (with backoff: the ESP32
+        // may still hold a PHANTOM connection after Android dropped it —
+        // it cannot advertise until its own supervision timeout fires
+        // (seconds). Blind rescanning during that window finds nothing.
+        val r = Runnable {
+            if (!ble.isReady) {
+                renderConnection(false)
+                // auto-retry with growing delay: 3 s, 6 s, 12 s … capped 30 s
+                val delay = (3000L * (1 shl (connectAttempts - 1).coerceAtMost(4)))
+                    .coerceAtMost(30_000L)
+                retryBtn.visibility = View.VISIBLE
+                retryBtn.text = "Erneut versuchen (auto in ${delay / 1000} s)"
+                val rr = Runnable {
+                    if (!ble.isReady && retryBtn.visibility == View.VISIBLE) autoConnect()
+                }
+                retryRunnable = rr
+                main.postDelayed(rr, delay)
+            }
+        }
+        main.postDelayed(r, CONNECT_TIMEOUT_MS)
+    }
+
+    private fun renderConnection(connected: Boolean) {
+        if (connected) {
+            bleStatus.text = "✓ Verbunden"
+            bleDetail.text = ""
+            retryBtn.visibility = View.GONE
+            startStreamIfReady()
         } else {
-            showRegionList()
+            bleStatus.text = "Nicht verbunden"
+            bleDetail.text = if (ble.adapterState().contains("aus")) "Bluetooth ist aus" else "Display nicht gefunden"
+            retryBtn.visibility = View.VISIBLE
         }
     }
 
-    private fun showRegionList() {
-        val regions = mapManager.regionList()
-        val names = regions.map { r ->
-            val state = if (mapManager.isRegionDownloaded(r.id)) "  ✓" else "  ⬇"
-            r.name + state
-        }.toTypedArray()
-        regionDialog?.dismiss()
-        regionDialog = android.app.AlertDialog.Builder(this)
-            .setTitle("Karten-Regionen (Geofabrik)")
-            .setItems(names) { _, which ->
-                val r = regions[which]
-                if (mapManager.isRegionDownloaded(r.id)) {
-                    android.app.AlertDialog.Builder(this)
-                        .setTitle(r.name)
-                        .setMessage("Region ist geladen. Löschen?")
-                        .setPositiveButton("Löschen") { _, _ -> mapManager.deleteRegion(r.id) }
-                        .setNegativeButton("Abbrechen", null)
-                        .show()
-                } else {
-                    mapStatus.text = "${r.name}: Starte Download …"
-                    mapManager.downloadRegion(r) { ok ->
-                        main.post { if (ok) regionDialog?.dismiss() }
-                    }
-                }
-            }
-            .setNegativeButton("Schließen", null)
-            .show()
+    private fun startStreamIfReady() {
+        if (!ble.isReady) return
+        if (StreamService.running) return
+        StreamService.start(this, ble, navSource, mapOn = true)
     }
 
-    private fun ensurePerms(then: () -> Unit) {
+    // The nav source: OsmAnd only (Mock removed from the UI; the factory
+    // still supports it for tests).
+    private val navSource by lazy {
+        val s = NavSourceFactory.create(SourceKind.OsmAnd, this) { line -> AppLog.append(line) }
+        (s as? de.jacksitlab.libremoto.bridge.OsmAndNavSource)?.attachMapManager(
+            (application as LibreMotoApp).mapManager)
+        s.start()
+        s
+    }
+
+    // ---- log --------------------------------------------------------
+
+    private fun toggleLog() {
+        logVisible = !logVisible
+        logView.visibility = if (logVisible) View.VISIBLE else View.GONE
+        logToggle.text = if (logVisible) "Log ▾" else "Log ▸"
+        if (logVisible) logView.text = AppLog.history().joinToString("\n")
+    }
+
+    private fun renderLog(line: String) {
+        if (!logVisible) return
+        logView.text = AppLog.history().takeLast(60).joinToString("\n")
+    }
+
+    // ---- permissions ------------------------------------------------
+
+    private fun ensurePerms() {
         val missing = PERMS.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
-        if (missing.isEmpty()) { then(); return }
-        ActivityCompat.requestPermissions(this, missing.toTypedArray(), REQ_PERMS)
-        // run the UI wiring regardless; permission grants will be applied on next tap
-        then()
+        if (missing.isNotEmpty()) {
+            ActivityCompat.requestPermissions(this, missing.toTypedArray(), REQ_PERMS)
+        }
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         if (requestCode == REQ_PERMS) {
-            val parts = permissions.mapIndexed { i, p ->
-                p.substringAfterLast('.') + if (grantResults.getOrNull(i) == PackageManager.PERMISSION_GRANTED) " OK" else " NEIN"
-            }
-            log("Berechtigungen: " + parts.joinToString(", "))
+            val granted = grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+            if (granted) autoConnect()
         }
     }
 
-    private fun findAndConnect() {
-        ble.startScan { name, address ->
-            log("Gefunden: $name → $address")
-            main.post { ble.connect(address) }
-        }
-    }
+    // ---- lifecycle ---------------------------------------------------
 
-    // ---- send ------------------------------------------------------
-    private fun sendOnce() {
-        if (!ble.isReady) { log("nicht bereit"); updateBleStatus(); return }
-        source.refresh()  // pull fresh route geometry + GPS bearing
-        val nav = source.navData()
-        val nd = if (cbMap.isChecked) nav.copy(mapOn = true) else nav
-        val json = nd.toJson()
-        ble.sendNavData(json)
-        lastPayload.text = json
-        if (cbMap.isChecked) {
-            try {
-                val f = source.mapFrame(nextSeq())
-                val b = f.encode()
-                ble.sendMap(b)
-                if (f.segments.size > 1 || (System.currentTimeMillis() / 5000) % 2 == 0L) {
-                    log("Map: ${b.size} B, ${f.segments.size} Seg.")
-                }
-            } catch (e: IllegalArgumentException) {
-                log("Map: frame skipped (${e.message})")
-                seq = (seq + 1) % 256
-            } catch (e: Exception) {
-                log("Map: error ${e.message}")
-            }
-        }
-    }
-
-    private fun nextSeq(): Int { val s = seq; seq = (seq + 1) % 256; return s }
-
-    private fun toggleStream() {
-        if (streaming) { stopStream(); return }
-        if (!ble.isReady) { log("erst verbinden"); updateBleStatus(); return }
-        streaming = true
-        streamBtn.text = "Stream ⏸"
-        log("Stream startet (1 Hz via Foreground Service)…")
-        // Hand over streaming entirely to the foreground service.
-        // The service runs its own pump loop — the activity does NOT pump.
-        // This keeps the stream alive even when the app is backgrounded.
-        StreamService.start(this, ble, source, cbMap.isChecked)
-        StreamService.seq = seq
-    }
-
-    private fun stopStream() {
-        streaming = false
-        StreamService.stop(this)
-        if (::streamBtn.isInitialized) streamBtn.text = "Stream ✕"
-    }
-
-    // ---- log -------------------------------------------------------
-    // log() is called from several threads (OsmAnd AIDL callbacks arrive on a
-    // binder thread, BLE callbacks, the stream timer). TextViews may only be
-    // touched from the main thread, so marshal every write through `main`.
-    // Every line is also mirrored to logcat (tag "LibreMoto") for `adb logcat`.
-    private fun log(line: String) {
-        try { android.util.Log.d("LibreMoto", line) } catch (_: Throwable) {}
-        main.post {
-            if (!::logView.isInitialized) return@post
-            val t = (System.currentTimeMillis() % 86_400_000) / 1000
-            val stamp = "${t / 3600}:${(t / 60) % 60}:${(t % 60)}"
-            val next = logView.text.toString() + "$stamp  $line\n"
-            val lines = next.split('\n')
-            logView.setText(if (lines.size > 60) lines.takeLast(60).joinToString("\n") else next)
-        }
+    override fun onResume() {
+        super.onResume()
+        renderConnection(ble.isReady)
+        // keep the map status line fresh
+        val mm = (application as LibreMotoApp).mapManager
+        mapStatus.text = if (mm.loadedRegions().isEmpty()) "Keine Karten geladen (Menü → Karten-Verwaltung)"
+        else "Karten: ${mm.loadedRegions().keys.joinToString()}"
     }
 
     override fun onDestroy() {
-        stopStream()
-        try { ble.disconnect() } catch (_: Exception) {}
+        AppLog.unsubscribe(logListener)
         super.onDestroy()
     }
 }
