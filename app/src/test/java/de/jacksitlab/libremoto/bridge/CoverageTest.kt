@@ -61,4 +61,18 @@ class CoverageTest {
         assertEquals(gapPoint.first, gap!!.first, 0.0001)
         assertEquals(gapPoint.second, gap.second, 0.0001)
     }
+
+    /** v2 format: maxspeed tags must survive the build → load round-trip.
+     *  Liechtenstein's main roads carry maxspeed tags, so at least one
+     *  road near Vaduz must report a limit > 0. */
+    @Test
+    fun maxspeedSurvivesRoundTrip() {
+        val map = LmmBuilder.build(OsmPbfReader.scan(fixture))
+            .let { LmmMap.load(ByteArrayInputStream(it.bytes)) }
+        val near = map.queryBbox(47.10, 9.50, 47.13, 9.54)
+        assertTrue("keine Straßen bei Vaduz gefunden", near.isNotEmpty())
+        val withLimit = near.count { it.maxspeedKmh > 0 }
+        println("maxspeed: $withLimit/${near.size} Straßen bei Vaduz mit Limit")
+        assertTrue("erwartet: mind. eine Straße mit maxspeed bei Vaduz", withLimit > 0)
+    }
 }

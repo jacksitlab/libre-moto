@@ -146,8 +146,14 @@ object LmmBuilder {
                 if (chainLat[k] == chainLat[w - 1] && chainLon[k] == chainLon[w - 1]) continue
                 chainLat[w] = chainLat[k]; chainLon[w] = chainLon[k]; w++
             }
+            var mergedSpeed = 0
+            for (ci in chainIdx.indices) {
+                val r = roads[chainIdx[ci]]
+                if (r.maxspeedKmh > mergedSpeed) mergedSpeed = r.maxspeedKmh
+            }
             out.add(RoadT(roads[startRoad].typeIdx,
-                chainLat.toIntArray().copyOf(w), chainLon.toIntArray().copyOf(w)))
+                chainLat.toIntArray().copyOf(w), chainLon.toIntArray().copyOf(w),
+                mergedSpeed))
         }
         return out
     }
@@ -181,7 +187,8 @@ object LmmBuilder {
     }
 
     /** Internal road type for merging (typeIdx + coords). */
-    data class RoadT(val typeIdx: Int, val lat: IntArray, val lon: IntArray)
+    data class RoadT(val typeIdx: Int, val lat: IntArray, val lon: IntArray,
+                     val maxspeedKmh: Int = 0)
 
     data class Built(val bytes: ByteArray, val roadCount: Int, val tileCount: Int, val droppedIncomplete: Int)
 
@@ -212,7 +219,7 @@ object LmmBuilder {
             }
             if (!ok) { dropped++; continue }
             if (w.refs.size < 2) continue
-            rawRoads.add(RoadT(typeIdx, lat, lon))
+            rawRoads.add(RoadT(typeIdx, lat, lon, w.maxspeedKmh))
         }
         res.releaseWays()
 
@@ -226,8 +233,9 @@ object LmmBuilder {
         rawRoads.clear()   // merged roads hold copies; free the originals
 
         // road table size (exact, for the final blob allocation)
+        // v2: +1 B maxspeed per road
         var roadBytes = 0
-        for (r in roads) roadBytes += 2 + r.lat.size * 8
+        for (r in roads) roadBytes += 3 + r.lat.size * 8   // v2: type+maxspeed+npts
 
         // tile index: every road into every tile its bbox overlaps.
         // Primitive arrays (tile key packed Long → index sort) — the
@@ -279,7 +287,7 @@ object LmmBuilder {
             out[op++] = (v and 0xFF).toByte(); out[op++] = ((v shr 8) and 0xFF).toByte()
             out[op++] = ((v shr 16) and 0xFF).toByte(); out[op++] = ((v shr 24) and 0xFF).toByte()
         }
-        "LMM1".toByteArray().forEach { out[op++] = it }
+        "LMM2".toByteArray().forEach { out[op++] = it }
         putU32(tileCount)
         putU32(n)
         // tile table: (tx, ty, firstRoadIdx, endRoadIdx) with min/max of the
@@ -305,6 +313,7 @@ object LmmBuilder {
         for (ri in 0 until n) {
             val r = roads[ri]
             out[rp++] = r.typeIdx.toByte()
+            out[rp++] = r.maxspeedKmh.coerceIn(0, 255).toByte()
             val npts = r.lat.size.coerceAtMost(MAX_NPTS)
             out[rp++] = npts.toByte()
             for (i in 0 until npts) {

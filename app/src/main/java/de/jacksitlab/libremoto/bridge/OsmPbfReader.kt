@@ -37,8 +37,8 @@ import java.io.InputStream
 import java.util.Arrays
 import java.util.zip.InflaterInputStream
 
-/** One OSM way: highway tag + node ids. */
-class OsmWay(val id: Long, val highway: String, val refs: LongArray)
+/** One OSM way: highway tag + node ids (+ maxspeed km/h, 0 = none/unknown). */
+class OsmWay(val id: Long, val highway: String, val refs: LongArray, val maxspeedKmh: Int = 0)
 
 /** Scan result: ways + a primitive id→coord table (binary-searched).
  *  After LmmBuilder.build() consumed the ways, call releaseWays() — on
@@ -229,12 +229,17 @@ object OsmPbfReader {
         val k = keys ?: return
         val v = vals ?: return
         var highway: String? = null
+        var maxspeed: Int = 0
         for (j in k.indices) {
             if (j < v.size) {
                 val key = strings.getOrNull(k[j].toInt()) ?: continue
+                val value = strings.getOrNull(v[j].toInt()) ?: continue
                 if (key == "highway") {
-                    highway = strings.getOrNull(v[j].toInt())
-                    break
+                    highway = value
+                } else if (key == "maxspeed" && maxspeed == 0) {
+                    /* "50", "50 kph", "zone:30" → take the plain number;
+                       anything else (walk, signals, "none") = unknown (0). */
+                    maxspeed = value.takeWhile { it.isDigit() }.toIntOrNull() ?: 0
                 }
             }
         }
@@ -249,7 +254,7 @@ object OsmPbfReader {
             out[j] = ref
             refBag.add(ref)
         }
-        ways.add(OsmWay(id, highway, out))
+        ways.add(OsmWay(id, highway, out, maxspeed.coerceAtMost(255)))
     }
 
     // ---- osmformat.proto: PrimitiveBlock — PASS 2 (node coords) -----------

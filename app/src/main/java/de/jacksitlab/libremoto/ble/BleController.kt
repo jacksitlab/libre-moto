@@ -97,6 +97,7 @@ class BleController(private val context: Context, log: (String) -> Unit) {
         @Volatile var writeCbs = 0L           // onCharacteristicWrite received
         @Volatile var pacedWrites = 0L        // writes released by the 40 ms timer
         @Volatile var active = false         // set once the GATT link is usable
+        @Volatile var rejects = 0            // consecutive writeCharacteristic rejections
     }
     @Volatile private var droppedMaps = 0L
     @Volatile private var lastMapDropLog = 0L
@@ -171,9 +172,26 @@ class BleController(private val context: Context, log: (String) -> Unit) {
                         val ok = g.writeCharacteristic(c)
                         if (!ok) {
                             Tx.busy = false
-                            log("tx: writeCharacteristic abgelehnt — Chunk verworfen")
+                            /* WEDGE DETECTION: 'ok=false' means the stack
+                             * refused the command — on this tablet it
+                             * refuses with 'prior command is not finished'
+                             * once its ATT pipeline is wedged (a command
+                             * that never completed, e.g. after the peer
+                             * reset mid-write). The stack never recovers
+                             * from that on its own; only a fresh GATT
+                             * object does. After a few consecutive
+                             * rejections, tear the connection down —
+                             * the normal auto-reconnect rebuilds it. */
+                            Tx.rejects++
+                            if (Tx.rejects >= 5) {
+                                log("tx: ${Tx.rejects}× abgelehnt — GATT verkeilt, baue Verbindung neu auf")
+                                recoverWedgedGatt(g)
+                            } else {
+                                log("tx: writeCharacteristic abgelehnt — Chunk verworfen")
+                            }
                             return
                         }
+                        Tx.rejects = 0
                         if (data[0].toInt() and 0xFF == CH_MAP) {
                             lastMapWriteAtMs = System.currentTimeMillis()
                         }
@@ -211,7 +229,21 @@ class BleController(private val context: Context, log: (String) -> Unit) {
         val n = Tx.queue.size
         Tx.queue.clear()
         Tx.busy = false
+        Tx.rejects = 0
         if (n > 0) log("tx: $n Einträge verworfen ($reason)")
+    }
+
+    /** Recover a wedged ATT pipeline: the stack refuses every
+     *  writeCharacteristic ('prior command is not finished') forever —
+     *  only a fresh GATT object clears it. Tearing the connection down
+     *  triggers the normal disconnect → auto-reconnect cycle, which
+     *  creates exactly that fresh object. Called from the TX thread. */
+    @SuppressLint("MissingPermission")
+    private fun recoverWedgedGatt(g: android.bluetooth.BluetoothGatt) {
+        Tx.active = false
+        clearTx("GATT verkeilt")
+        try { g.disconnect() } catch (_: Exception) {}
+        // close() happens in onConnectionStateChange(STATE_DISCONNECTED)
     }
 
 

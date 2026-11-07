@@ -34,8 +34,10 @@ import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-/** One street: highway type + polyline (WGS84, 1e7 fixed point). */
-class LmmRoad(val highway: String, val latE7: IntArray, val lonE7: IntArray) {
+/** One street: highway type + polyline (WGS84, 1e7 fixed point)
+ *  + maxspeed km/h from OSM (0 = not tagged). */
+class LmmRoad(val highway: String, val latE7: IntArray, val lonE7: IntArray,
+              val maxspeedKmh: Int = 0) {
     val npts: Int get() = latE7.size
 }
 
@@ -129,7 +131,8 @@ class LmmMap private constructor(
             if (buf.size < 12) throw EOFException("lmm zu kurz")
             val bb = ByteBuffer.wrap(buf).order(ByteOrder.LITTLE_ENDIAN)
             val magic = ByteArray(4).also { bb.get(it) }.decodeToString()
-            if (magic != "LMM1") throw IllegalArgumentException("kein LMM-File: $magic")
+            val v2 = magic == "LMM2"
+            if (magic != "LMM1" && !v2) throw IllegalArgumentException("kein LMM-File: $magic")
             val tileCount = bb.int
             val roadCount = bb.int
             if (tileCount < 0 || roadCount < 0) throw IllegalArgumentException("bad counts")
@@ -151,20 +154,22 @@ class LmmMap private constructor(
             // road table
             val roads = ArrayList<LmmRoad>(roadCount)
             var pos = roadStart
+            val hdr = if (v2) 3 else 2   // type [+ maxspeed] + npts
             while (pos < buf.size) {
                 val typeIdx = buf[pos].toInt() and 0xFF
-                val npts = buf[pos + 1].toInt() and 0xFF
+                val maxspeed = if (v2) buf[pos + 1].toInt() and 0xFF else 0
+                val npts = buf[pos + hdr - 1].toInt() and 0xFF
                 if (typeIdx >= TYPES.size) throw IllegalArgumentException("bad type $typeIdx")
-                if (pos + 2 + npts * 8 > buf.size) throw EOFException("lmm zu kurz (Roads)")
+                if (pos + hdr + npts * 8 > buf.size) throw EOFException("lmm zu kurz (Roads)")
                 val lat = IntArray(npts)
                 val lon = IntArray(npts)
-                var p = pos + 2
+                var p = pos + hdr
                 for (i in 0 until npts) {
                     lat[i] = readI32(buf, p)
                     lon[i] = readI32(buf, p + 4)
                     p += 8
                 }
-                roads.add(LmmRoad(TYPES[typeIdx], lat, lon))
+                roads.add(LmmRoad(TYPES[typeIdx], lat, lon, maxspeed))
                 pos = p
             }
             if (roads.size != roadCount) throw IllegalArgumentException(

@@ -106,6 +106,19 @@ class StreamService : Service() {
         t.start()
     }
 
+    /** Tracks whether the display already knows we are idle — the idle
+     *  NavData is sent ONCE when navigation ends (so the display goes to
+     *  home), then the stream stays silent until nav starts again.
+     *  User requirement: BLE data ONLY while a navigation is active. */
+    @Volatile private var idleAnnounced = false
+
+    /** Heartbeat while idle: keeps the TX path exercised (a wedged ATT
+     *  pipeline is only detectable with traffic — the wedge detector
+     *  needs writes to reject) and lets the firmware see the link is
+     *  alive. 5 s = far below the 15 s link timeout, negligible airtime. */
+    private var lastBeatMs = 0L
+    private val beatIntervalMs = 5_000L
+
     private fun pumpOnce() {
         val b = ble ?: return
         val s = source ?: return
@@ -113,6 +126,19 @@ class StreamService : Service() {
 
         s.refresh()
         val nav = s.navData()
+        if (!s.isNavigating) {
+            val now = System.currentTimeMillis()
+            if (!idleAnnounced) {
+                idleAnnounced = true
+                b.sendNavData(nav.toJson())   // one "idle" → display goes home
+                lastBeatMs = now
+            } else if (now - lastBeatMs >= beatIntervalMs) {
+                b.sendNavData(NavData.BEAT.toJson())   // heartbeat ping
+                lastBeatMs = now
+            }
+            return   // no map frames, no nav data without navigation
+        }
+        idleAnnounced = false
         val nd = if (mapEnabled) nav.copy(mapOn = true) else nav
         b.sendNavData(nd.toJson())
         if (mapEnabled) {

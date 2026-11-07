@@ -308,6 +308,7 @@ class OsmAndNavSource(
             type = NavType.Nav,
             maneuver = maneuver(turnType),
             distM = distanceToM,
+            limitKmh = if (currentLimitKmh > 0) currentLimitKmh else null,
             mapOn = true,
         )
     }
@@ -466,6 +467,42 @@ class OsmAndNavSource(
 
     /** Pull nearby roads for the current position. PRIMARY: .lmm vector maps
      *  via MapManager (bbox query in memory, no binder call). FALLBACK: AIDL. */
+    /** Speed limit of the road under the vehicle (0 = unknown).
+     *  Updated with the nearby-roads pull from the .lmm map. */
+    @Volatile private var currentLimitKmh = 0
+
+    /** maxspeed of the road nearest to the vehicle (equirectangular
+     *  point-to-polyline distance; roads farther than 40 m are ignored —
+     *  on a motorway the parallel opposite carriageway is ~20-30 m away,
+     *  and the correct side is nearer). Returns 0 if nothing qualifies. */
+    private fun nearestRoadMaxspeed(roads: List<LmmRoad>, lat: Double, lon: Double): Int {
+        var best = Double.MAX_VALUE
+        var bestSpeed = 0
+        val refLat = MapProjector.METERS_PER_DEG_LAT
+        val refMPerLon = refLat * Math.cos(Math.toRadians(lat))
+        val vx = lon * refMPerLon
+        val vy = lat * refLat
+        for (r in roads) {
+            for (i in 0 until r.npts - 1) {
+                val ax = r.lonE7[i] / 1e7 * refMPerLon
+                val ay = r.latE7[i] / 1e7 * refLat
+                val bx = r.lonE7[i + 1] / 1e7 * refMPerLon
+                val by = r.latE7[i + 1] / 1e7 * refLat
+                val dx = bx - ax; val dy = by - ay
+                val len2 = dx * dx + dy * dy
+                val t = if (len2 == 0.0) 0.0
+                        else (((vx - ax) * dx + (vy - ay) * dy) / len2).coerceIn(0.0, 1.0)
+                val px = ax + t * dx; val py = ay + t * dy
+                val d2 = (vx - px) * (vx - px) + (vy - py) * (vy - py)
+                if (d2 < best) {
+                    best = d2
+                    bestSpeed = r.maxspeedKmh
+                }
+            }
+        }
+        return if (best <= 40.0 * 40.0) bestSpeed else 0
+    }
+
     private fun pullNearbyRoads() {
         val pts = routePoints
         if (pts.isEmpty()) return
@@ -493,6 +530,7 @@ class OsmAndNavSource(
         } else null
 
         if (lmmRoads != null && lmmRoads.isNotEmpty()) {
+            currentLimitKmh = nearestRoadMaxspeed(lmmRoads, centerLat, centerLon)
             val out = ArrayList<net.osmand.aidlapi.map.ARoadPolyline>(lmmRoads.size)
             for (r in lmmRoads) {
                 val poly = net.osmand.aidlapi.map.ARoadPolyline()
