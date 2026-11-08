@@ -80,7 +80,10 @@ Field meaning:
 ## 4. `MapData` (binary, little-endian, one frame per logical write)
 
 A frame is split into **512 B chunks** (Write Without Response + re-write).
-A complete frame must arrive within 500 ms, otherwise the frame is dropped (`map_drop_count++`).
+A chunk starting with the frame magic (`4C 4D 01`) closes the previous frame
+immediately — frames may stream back-to-back. The last frame of a burst is
+closed by the **500 ms gap timeout**. Sender contract: a continuation chunk
+must never start with `4C 4D 01` (the sender shifts chunk boundaries).
 
 ```
 Offset  Size   Field        Type    Description
