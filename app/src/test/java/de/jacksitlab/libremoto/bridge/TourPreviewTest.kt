@@ -99,7 +99,7 @@ class TourPreviewTest {
             val out = proc.inputStream.bufferedReader().readText()
             proc.waitFor()
             val streets = frame.segments.count { it.type == de.jacksitlab.libremoto.protocol.SegmentType.Road }
-            val line = "Stop %02d: %.5f,%.5f  roads im Frame=%d  PNG=%s".format(
+            val line = "Stop %02d: %.5f,%.5f  roads in frame=%d  PNG=%s".format(
                 n, stop.latitude, stop.longitude, streets, png.name)
             prog(line)
             report.appendLine(line)

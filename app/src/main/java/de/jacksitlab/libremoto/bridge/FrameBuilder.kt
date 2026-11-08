@@ -42,6 +42,54 @@ object FrameBuilder {
         ((Math.round(p.latitude * 1e6).toLong()) shl 32) or
          (Math.round(p.longitude * 1e6).toLong() and 0xFFFFFFFFL)
 
+    /** Douglas-Peucker-style simplification with a point budget: keeps both
+     *  endpoints, then repeatedly keeps the point with the largest distance
+     *  from the current simplified chain until the budget is exhausted.
+     *  Straight stretches lose points early, curves keep them — unlike
+     *  uniform sampling, which mangled distant curves into polygons. */
+    private fun simplifyKeepEnds(pts: List<LatLon>, maxPoints: Int): List<LatLon> {
+        if (pts.size <= 2 || pts.size <= maxPoints) return pts
+        // squared-distance in degrees is not uniform, but good enough for
+        // RANKING which points matter most (the scale factor is common).
+        val keep = BooleanArray(pts.size)
+        keep[0] = true
+        keep[pts.size - 1] = true
+        var kept = 2
+        // priority queue of (error, lo, mid, hi) — split the worst range first
+        val pq = java.util.PriorityQueue<DoubleArray>(compareByDescending { it[0] })
+        fun enqueueRange(lo: Int, hi: Int) {
+            if (hi - lo < 2) return
+            val a = pts[lo]; val b = pts[hi]
+            var worst = -1.0; var worstIdx = -1
+            for (i in lo + 1 until hi) {
+                val p = pts[i]
+                val dx = b.longitude - a.longitude
+                val dy = b.latitude - a.latitude
+                val len2 = dx * dx + dy * dy
+                val t = if (len2 == 0.0) 0.0
+                        else (((p.longitude - a.longitude) * dx + (p.latitude - a.latitude) * dy) / len2)
+                            .coerceIn(0.0, 1.0)
+                val ex = a.longitude + t * dx - p.longitude
+                val ey = a.latitude + t * dy - p.latitude
+                val d2 = ex * ex + ey * ey
+                if (d2 > worst) { worst = d2; worstIdx = i }
+            }
+            if (worstIdx > 0) pq.add(doubleArrayOf(worst, lo.toDouble(), worstIdx.toDouble(), hi.toDouble()))
+        }
+        enqueueRange(0, pts.size - 1)
+        while (kept < maxPoints && pq.isNotEmpty()) {
+            val e = pq.poll()
+            val mid = e[2].toInt()
+            if (keep[mid]) continue
+            keep[mid] = true; kept++
+            enqueueRange(e[1].toInt(), mid)
+            enqueueRange(mid, e[3].toInt())
+        }
+        val out = ArrayList<LatLon>(kept)
+        for (i in pts.indices) if (keep[i]) out.add(pts[i])
+        return out
+    }
+
     /** Straight placeholder route (no route data). */
     fun fallbackFrame(seq: Int, headingDeg10: Int, scale100: Int,
                       distanceToM: Int): MapFrame {
@@ -71,34 +119,14 @@ object FrameBuilder {
                    route: List<LatLon>, streets: List<StreetRoad>,
                    trail: List<LatLon> = emptyList(),
                    log: ((String) -> Unit)? = null): MapFrame {
-        if (route.size < 2) throw IllegalArgumentException("route < 2 Punkte")
+        if (route.size < 2) throw IllegalArgumentException("route < 2 points")
         val ref = route[0]
         val segments = ArrayList<Segment>(2 + streets.size)
 
-        // ---- route segment ----
-        val maxPts = minOf(route.size, MapFrame.MAX_PTS)
-        val pixelPts = MapProjector.projectPolyline(ref, route.subList(0, maxPts), scale100)
-        segments.add(Segment(SegmentType.Route, MapProjector.routeWidthPx(scale100), pixelPts))
-
-        // ---- trail segment (the road BEHIND the vehicle) ----
-        // OsmAnd delivers the route with the passed segment cut off
-        // (setIncludePassedSegment(false)), so streets behind us have no
-        // corridor and vanished. The caller feeds the recent real track
-        // (breadcrumbs) here; it renders as a second route segment and the
-        // corridor filter treats it like the route — streets alongside the
-        // road we just rode stay visible.
-        if (trail.size >= 2) {
-            val tPts = MapProjector.projectPolyline(ref, trail, scale100)
-            if (tPts.size >= 2) {
-                segments.add(Segment(SegmentType.Route, MapProjector.routeWidthPx(scale100), tPts))
-            }
-        }
-
-        // ---- street segments (corridor → clip → chain → rank → budget) ----
-        // The visible window in lat/lon — ASYMMETRIC (vehicle at one third
-        // from the bottom, MAP_CY=320): 260 px of world ahead (north),
-        // 160 px behind (south), ±260 px sideways. +10% margin so streets
-        // enter off-screen.
+        // ---- visible window (lat/lon bbox) — computed FIRST because the
+        // route + trail are clipped against it below. Asymmetric (vehicle at
+        // one third from the bottom, MAP_CY=320): AHEAD_PX ahead, BEHIND_PX
+        // behind, ±SIDE_PX sideways. +10% margin so lines enter off-screen.
         val pxPerMeter = scale100 / 100.0
         val aheadM = (MapProjector.AHEAD_PX / pxPerMeter) * 1.1
         val behindM = (MapProjector.BEHIND_PX / pxPerMeter) * 1.1
@@ -109,6 +137,47 @@ object FrameBuilder {
         val maxLat = ref.latitude + aheadM / MapProjector.METERS_PER_DEG_LAT
         val minLon = ref.longitude - sideM / mPerDegLon
         val maxLon = ref.longitude + sideM / mPerDegLon
+
+        // ---- route segment: CLIPPED to the window, then projected ----
+        // projectPolyline clamps out-of-window points onto the window edge
+        // (a deliberate guard for the wire format), so feeding it the WHOLE
+        // route folded everything beyond the horizon onto the top edge —
+        // the route appeared bent along the top border. Clip first: the
+        // route now ENDS at the window edge instead of folding.
+        val routeClipped = MapProjector.clipPolylineToBbox(route, minLat, minLon, maxLat, maxLon)
+        val routeVisible = routeClipped.maxByOrNull { it.size } ?: emptyList()
+        if (routeVisible.size < 2) {
+            // ref itself is outside its own window (should not happen) — fall
+            // back to the unclipped head so the frame still has a route line
+            val maxPts = minOf(route.size, MapFrame.MAX_PTS)
+            segments.add(Segment(SegmentType.Route, MapProjector.routeWidthPx(scale100),
+                MapProjector.projectPolyline(ref, route.subList(0, maxPts), scale100)))
+        } else {
+            val maxPts = minOf(routeVisible.size, MapFrame.MAX_PTS)
+            segments.add(Segment(SegmentType.Route, MapProjector.routeWidthPx(scale100),
+                MapProjector.projectPolyline(ref, routeVisible.subList(0, maxPts), scale100)))
+        }
+
+        // ---- trail segment (the road BEHIND the vehicle) ----
+        // OsmAnd delivers the route with the passed segment cut off
+        // (setIncludePassedSegment(false)), so streets behind us have no
+        // corridor and vanished. The caller feeds the recent real track
+        // (breadcrumbs) here; it renders as a second route segment and the
+        // corridor filter treats it like the route — streets alongside the
+        // road we just rode stay visible.
+        if (trail.size >= 2) {
+            val trailVisible = MapProjector.clipPolylineToBbox(trail, minLat, minLon, maxLat, maxLon)
+                .maxByOrNull { it.size } ?: emptyList()
+            if (trailVisible.size >= 2) {
+                val tPts = MapProjector.projectPolyline(ref, trailVisible, scale100)
+                if (tPts.size >= 2) {
+                    segments.add(Segment(SegmentType.Route, MapProjector.routeWidthPx(scale100), tPts))
+                }
+            }
+        }
+
+        // ---- street segments (corridor → clip → chain → rank → budget) ----
+        // (the window bbox above is reused for the street clipping)
 
         // 0. CORRIDOR FILTER (Beeline-style): only streets relevant to the
         //    route — crossing/mouthing streets (shown IN FULL) and parallels
@@ -286,17 +355,17 @@ object FrameBuilder {
         for (street in ranked) {
             if (totalSegs >= MapFrame.MAX_SEGS || budgetBytes < 83) break
             val roadPts = street.pts
-            // 3. DECIMATE the (already clipped + chained!) visible part
-            //    to ≤20 points spread over the whole visible stretch
-            val maxRoadPts = minOf(roadPts.size, 20)
-            val step = if (roadPts.size <= maxRoadPts) 1.0
-                       else (roadPts.size - 1).toDouble() / (maxRoadPts - 1)
-            val sampled = ArrayList<LatLon>(maxRoadPts)
-            var idx = 0.0
-            for (i in 0 until maxRoadPts) {
-                sampled.add(roadPts[idx.toInt()])
-                idx += step
-            }
+            // 3. SIMPLIFY the (already clipped + chained!) visible part.
+            //    Uniform sampling to ≤20 points turned distant curves into
+            //    crude polygons (20 points over hundreds of metres); the
+            //    Douglas-Peucker-style simplification keeps the geometry:
+            //    straight stretches lose points, curves keep them.
+            //    Budget-driven: each point costs 4 wire bytes, so the
+            //    street gets as many points as the remaining budget allows
+            //    (capped at MAX_PTS).
+            val allowedPts = minOf(MapFrame.MAX_PTS,
+                (budgetBytes - 3 - 83) / 4).coerceAtLeast(2)
+            val sampled = simplifyKeepEnds(roadPts, allowedPts)
             val rPts = MapProjector.projectPolyline(ref, sampled, scale100)
             if (rPts.size >= 2) {
                 val widthPx = MapProjector.roadWidthPx(street.roadType, scale100)
