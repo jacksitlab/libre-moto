@@ -67,8 +67,8 @@ class MainActivity : AppCompatActivity() {
         retryBtn.setOnClickListener { autoConnect() }
         logToggle.setOnClickListener { toggleLog() }
 
-        // Menü (⋮) oben rechts: klassisches PopupMenu — deterministisch
-        // sichtbar, unabhängig vom Theme (Toolbar zeigte auf Samsung nur
+        // Menu (⋮) top right: classic PopupMenu — deterministic
+        // visible regardless of theme (the toolbar only showed
         // den Titel, keine drei Punkte).
         findViewById<TextView>(R.id.menu_btn).setOnClickListener { anchor ->
             val pm = android.widget.PopupMenu(this, anchor)
@@ -207,7 +207,7 @@ class MainActivity : AppCompatActivity() {
         renderConnection(ble.isReady)
         // keep the map status line fresh
         val mm = (application as LibreMotoApp).mapManager
-        mapStatus.text = if (mm.loadedRegions().isEmpty()) "Keine Karten geladen (Menü → Karten-Verwaltung)"
+        mapStatus.text = if (mm.loadedRegions().isEmpty()) "No maps installed (menu → map manager)"
         else "Karten: ${mm.loadedRegions().keys.joinToString()}"
     }
 

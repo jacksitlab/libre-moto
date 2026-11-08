@@ -10,7 +10,7 @@
  * pipeline). Output: build/map-preview/tour/tour-<n>.png + tour.txt
  * with a per-stop street report (types in window, in frame, dropped).
  *
- * Stops are chosen to answer "how does it look at different points":
+ * stops are chosen to answer "how does it look at different points":
  *  - a grid over the map's populated tiles (systematic coverage)
  *  - the densest spots (most streets in a 500 m window — city centres)
  *  - the emptiest spots (few streets — rural roads, worst case)
@@ -37,17 +37,17 @@ class TourPreviewTest {
     private val enabled = System.getProperty("runTour", "false").toBoolean()
 
     /** Max stops — keep the output manageable (runtime: ~1 s per stop). */
-    private val maxStops = 12
+    private val maxstops = 12
 
-    /** VIEWER MODE: explicit stops via -DtourStops="lat,lon[;lat,lon…]".
+    /** VIEWER MODE: explicit stops via -Dtourstops="lat,lon[;lat,lon…]".
      *  Renders the EXACT production frames at your coordinates (any zoom
      *  via -DtourScale=48) so you can verify the display offline:
      *    ./gradlew testDebugUnitTest --tests '*TourPreview*' \
-     *      -DrunTour=true -DtourStops="52.51933,13.34229" --rerun-tasks
+     *      -DrunTour=true -Dtourstops="52.51933,13.34229" --rerun-tasks
      *  → build/map-preview/tour/tour-00.png (+ .bin) at that point.
      *  Empty/unset → automatic density-based stop selection (as before). */
-    private val explicitStops: List<LatLon>? =
-        System.getProperty("tourStops")?.split(';')
+    private val explicitstops: List<LatLon>? =
+        System.getProperty("tourstops")?.split(';')
             ?.mapNotNull { s ->
                 val p = s.split(',').map { it.trim() }
                 if (p.size == 2) p[0].toDoubleOrNull()?.let { la ->
@@ -78,13 +78,13 @@ class TourPreviewTest {
         val res = OsmPbfReader.scan(pbf)
         val built = LmmBuilder.build(res)
         val map = LmmMap.load(ByteArrayInputStream(built.bytes))
-        assertTrue("keine Straßen im pbf", map.roadCount > 0)
-        prog("Karte: ${map.roadCount} Straßen, ${built.tileCount} Kacheln, ${built.bytes.size / 1024} KB")
+        assertTrue("keine roads im pbf", map.roadCount > 0)
+        prog("map: ${map.roadCount} roads, ${built.tileCount} tiles, ${built.bytes.size / 1024} KB")
 
         // ---- pick stops: explicit viewer coordinates or automatic ----
-        prog(if (explicitStops != null) "Viewer-Modus: ${explicitStops.size} Stops vorgegeben" else "Wähle Stops …")
-        val stops = explicitStops ?: pickStops(map)
-        prog("Stops gewählt: ${stops.size}")
+        prog(if (explicitstops != null) "viewer mode: ${explicitstops.size} stops provided" else "choosing stops …")
+        val stops = explicitstops ?: pickstops(map)
+        prog("stops chosen: ${stops.size}")
 
         // ---- render every stop through the full chain ----
         val renderTool = buildRenderTool()
@@ -99,7 +99,7 @@ class TourPreviewTest {
             val out = proc.inputStream.bufferedReader().readText()
             proc.waitFor()
             val streets = frame.segments.count { it.type == de.jacksitlab.libremoto.protocol.SegmentType.Road }
-            val line = "Stop %02d: %.5f,%.5f  Straßen im Frame=%d  PNG=%s".format(
+            val line = "Stop %02d: %.5f,%.5f  roads im Frame=%d  PNG=%s".format(
                 n, stop.latitude, stop.longitude, streets, png.name)
             prog(line)
             report.appendLine(line)
@@ -117,7 +117,7 @@ class TourPreviewTest {
      *  Density via TILE road counts (O(roads)), NOT per-street queries —
      *  a per-street queryBbox over 100k streets ran for hours on
      *  Brandenburg-sized regions. */
-    private fun pickStops(map: LmmMap): List<LatLon> {
+    private fun pickstops(map: LmmMap): List<LatLon> {
         val roads = map.allRoads()
 
         // density proxy: number of roads in the street's own tile
@@ -133,15 +133,15 @@ class TourPreviewTest {
 
         cands.sortBy { it.tileRoads }
         val picked = ArrayList<LatLon>()
-        val step = (cands.size / (maxStops - 2)).coerceAtLeast(1)
+        val step = (cands.size / (maxstops - 2)).coerceAtLeast(1)
         var i = 0
-        while (picked.size < maxStops - 2 && i < cands.size) {
+        while (picked.size < maxstops - 2 && i < cands.size) {
             picked.add(cands[i].pos)
             i += step
         }
         cands.firstOrNull()?.let { picked.add(0, it.pos) }
         cands.lastOrNull()?.let { picked.add(it.pos) }
-        return picked.take(maxStops)
+        return picked.take(maxstops)
     }
 
     /** The production frame build at a stop (same code as on the road).

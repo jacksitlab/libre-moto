@@ -55,14 +55,14 @@ class MapProjectorTest {
 
     private val scenario: List<Road> = listOf(
         // THE ROUTE: straight north on a residential street, then a right bend
-        Road("Route (Hauptstraße)", "residential", listOf(
+        Road("Route (main street)", "residential", listOf(
             at(0.0, 0.0), at(100.0, 0.0), at(200.0, 0.0), at(300.0, 0.0), at(400.0, 0.0),
             at(450.0, 40.0), at(500.0, 120.0), at(550.0, 220.0), at(600.0, 300.0),
         )),
         // parallel residential street, 120 m east
-        line("Nebenstraße Ost", "residential", 600.0 to 120.0, 300.0 to 120.0, 0.0 to 120.0, -300.0 to 120.0),
+        line("side street east", "residential", 600.0 to 120.0, 300.0 to 120.0, 0.0 to 120.0, -300.0 to 120.0),
         // secondary cross street 200 m ahead
-        line("Querstraße", "secondary", 200.0 to -400.0, 200.0 to -150.0, 200.0 to 0.0, 200.0 to 200.0, 200.0 to 400.0),
+        line("cross street", "secondary", 200.0 to -400.0, 200.0 to -150.0, 200.0 to 0.0, 200.0 to 200.0, 200.0 to 400.0),
         // service road turn candidate, 80 m ahead
         line("Abbiegung Ost", "service", 80.0 to 0.0, 80.0 to 60.0, 80.0 to 150.0),
         // dead-end alley behind-left
@@ -115,7 +115,7 @@ class MapProjectorTest {
                                  0, scale100, frameSegs)
             val bytes = frame.encode()
             println("Frame: ${frameSegs.size} Segmente, ${bytes.size} B (Limit ${MapFrame.MAX_FRAME} B)")
-            assertTrue("Frame zu groß: ${bytes.size}", bytes.size <= MapFrame.MAX_FRAME)
+            assertTrue("frame too large: ${bytes.size}", bytes.size <= MapFrame.MAX_FRAME)
 
             // vehicle-relative: first route point IS the vehicle
             assertEquals(Point(0, 0), segs[0].pts[0])

@@ -108,10 +108,10 @@ class MapManager(
                     out[gid] = GeofabrikRegion(gid, name, pbf, parentId, minLat, minLon, maxLat, maxLon)
                 }
                 regions = out
-                log("maps: ${out.size} Geofabrik-Regionen im Index")
+                log("maps: ${out.size} Geofabrik regions in index")
                 onDone(true)
             } catch (e: Exception) {
-                log("maps: Index-Fehler: ${e.message}")
+                log("maps: index error: ${e.message}")
                 onDone(false)
             }
         }
@@ -162,7 +162,7 @@ class MapManager(
             o.put("date", System.currentTimeMillis())
             o.put("bytes", bytes)
             metaFile(regionId).writeText(o.toString())
-        } catch (e: Exception) { log("maps: Meta-Schreibfehler $regionId: ${e.message}") }
+        } catch (e: Exception) { log("maps: meta write error $regionId: ${e.message}") }
     }
 
     /** Installed .lmm size in bytes (0 if missing). */
@@ -217,7 +217,7 @@ class MapManager(
         executor.execute {
             val target = File(mapsDir, "${region.id}.lmm")
             try {
-                ui("Lade ${region.name} …")
+                ui("Downloading ${region.name} …")
                 val tmp = File(context.cacheDir, "${region.id}.osm.pbf")
                 // Geofabrik's md5 for the pbf — stored in .meta for UPDATE
                 // detection (checkUpdates compares it later)
@@ -227,10 +227,10 @@ class MapManager(
                 } catch (_: Exception) { null }
                 httpDownload(region.pbfUrl, tmp) { done, total ->
                     val pct = if (total > 0) (done * 100 / total).toInt() else 0
-                    ui("Lade ${region.name}: ${done / 1048576} / ${total / 1048576} MB")
+                    ui("Downloading ${region.name}: ${done / 1048576} / ${total / 1048576} MB")
                     progress?.invoke(0, pct)
                 }
-                ui("Konvertiere ${region.name} …")
+                ui("Converting ${region.name} …")
                 progress?.invoke(1, 0)
                 val t0 = System.currentTimeMillis()
                 val res = OsmPbfReader.scan(tmp)
@@ -239,18 +239,19 @@ class MapManager(
                 FileOutputStream(target).use { it.write(built.bytes) }
                 writeMeta(region.id, md5, built.bytes.size.toLong())
                 tmp.delete()
-                ui("${region.name}: ${built.roadCount} Straßen, " +
-                   "${built.bytes.size / 1048576} MB — fertig " +
+                ui("${region.name}: ${built.roadCount} roads, " +
+                   "${built.bytes.size / 1048576} MB — done " +
                    "(${(System.currentTimeMillis() - t0) / 1000} s)")
-                log("maps: ${region.id} konvertiert: ${built.roadCount} Straßen, " +
-                    "Tiles ${built.tileCount}, dropped ${built.droppedIncomplete}")
+                log("maps: ${region.id} converted (format v2/LMM2): " +
+                    "${built.roadCount} roads, tiles ${built.tileCount}, " +
+                    "dropped ${built.droppedIncomplete}")
                 loadAll()
                 onDone(true)
             } catch (e: Exception) {
                 tmpSafeDelete(region.id)
                 target.delete()
-                ui("${region.name} fehlgeschlagen: ${e.message}")
-                log("maps: Download-Fehler ${region.id}: ${e.message}")
+                ui("${region.name} failed: ${e.message}")
+                log("maps: download error ${region.id}: ${e.message}")
                 onDone(false)
             }
         }
@@ -264,7 +265,7 @@ class MapManager(
         executor.execute {
             File(mapsDir, "$regionId.lmm").delete()
             loadAll()
-            ui("Region gelöscht: $regionId")
+            ui("Region deleted: $regionId")
         }
     }
 
@@ -279,15 +280,15 @@ class MapManager(
                 out[f.name.removeSuffix(".lmm")] = m
                 // version Visibility: v2 maps carry maxspeed data — the
                 // speed-limit sign on the display stays empty without them.
-                log("maps: ${f.name} = ${m.roadCount} Straßen, " +
-                    "Format ${if (m.hasMaxspeed) "v2 (mit Tempolimit)" else "v1 (ohne!)"}, " +
-                    "${m.roadsWithLimit} Straßen mit Limit")
+                log("maps: ${f.name} = ${m.roadCount} roads, " +
+                    "format ${if (m.hasMaxspeed) "v2 (with speed limits)" else "v1 (without!)"}, " +
+                    "${m.roadsWithLimit} roads with a limit")
             } catch (e: Exception) {
-                log("maps: Ladefehler ${f.name}: ${e.message}")
+                log("maps: load error ${f.name}: ${e.message}")
             }
         }
         maps = out
-        log("maps: ${out.size} Regionen geladen")
+        log("maps: ${out.size} regions loaded")
     }
 
     fun loadedRegions(): Map<String, LmmMap> = maps

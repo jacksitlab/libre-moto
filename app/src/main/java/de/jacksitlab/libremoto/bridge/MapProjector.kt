@@ -288,7 +288,7 @@ object MapProjector {
     /** Route segment width byte (stroke width in px). Clearly WIDER than
      *  the road it lies on (residential fill + 2 px) so the route reads as
      *  the dominant white line on the black road body — user request after
-     *  the first corridor rides ("die weiße Linie dicker machen"). */
+     *  the first corridor rides ("make the white line thicker"). */
     fun routeWidthPx(scale100: Int): Int =
         (roadWidthPx("residential", scale100) + 2).toInt().coerceIn(3, 16)
 

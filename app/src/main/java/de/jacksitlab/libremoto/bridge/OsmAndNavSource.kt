@@ -80,7 +80,7 @@ class OsmAndNavSource(
 
     // ---- speed-adaptive zoom -------------------------------------------
     // Voraussicht je nach Tempo: ~500 m in der Stadt (langsam, ≤ 30 km/h),
-    // ~1000 m außerhalb (schnell, ≥ 100 km/h), dazwischen linear.
+    // ~1000 m ahead (fast, ≥ 100 km/h), linear in between.
     // Skala: 240 px sind vor dem Fahrzeug sichtbar (480-px-Panel, Fahrzeug
     // mittig) → scale = 240 / lookahead_m × 100 (px/m × 100).
     private val zoomMinLookaheadM = 500.0
@@ -88,7 +88,7 @@ class OsmAndNavSource(
     private val zoomLowSpeedKmh = 30.0
     private val zoomHighSpeedKmh = 100.0
 
-    /** Geglättete Geschwindigkeit km/h (EMA über Ticks, robust gegen GPS-Sprünge). */
+    /** Smoothed speed km/h (EMA over ticks, robust against GPS jumps). */
     @Volatile private var smoothedSpeedKmh = 0.0
     @Volatile private var lastVehiclePos: ALatLon? = null
     @Volatile private var lastVehiclePosAtMs = 0L
@@ -100,14 +100,14 @@ class OsmAndNavSource(
     private val trail = ArrayList<LatLon>()
     private var trailMetres = 0.0
 
-    /** Aktueller Projektionsmaßstab px/m × 100 (wechselt weich mit der Geschwindigkeit). */
+    /** Current projection scale px/m × 100 (soft-follows the speed). */
     @Volatile private var dynamicScale = 24   // Start: 1000 m Voraussicht
-    /** Voraussicht in m, die der aktuelle dynamicScale abbildet (für Road-Radius). */
+    /** Lookahead in m that the current dynamicScale covers (for the road radius). */
     @Volatile private var currentLookaheadM = 1000.0
     /** Zoom-Hysterese: true = der Zoom folgt dem Ziel gerade (siehe 2c). */
     @Volatile private var zoomTracking = true
 
-    /** Ziel-Skala aus der geglätteten Geschwindigkeit (px/m × 100).
+    /** Target scale from the smoothed speed (px/m × 100).
      *  Reference: AHEAD_PX (320) — the display area in front of the vehicle
      *  (look-ahead layout). The SAME metre specs (500 m city … 1000 m
      *  country) now fill 320 px instead of 240 → everything renders 33 %
@@ -173,14 +173,14 @@ class OsmAndNavSource(
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, iBinder: IBinder) {
             svc = IOsmAndAidlInterface.Stub.asInterface(iBinder)
-            log("osmAnd: Service verbunden (V2)")
+            log("osmAnd: service connected (V2)")
         }
         override fun onServiceDisconnected(name: ComponentName) {
             svc = null
             bound = false
             navCallbackId = -1L
             routeCallbackId = -1L
-            log("osmAnd: Service getrennt")
+            log("osmAnd: service disconnected")
         }
     }
 
@@ -363,13 +363,13 @@ class OsmAndNavSource(
             flags = flags or Context.BIND_ALLOW_ACTIVITY_STARTS
         }
         val ok = try { context.bindService(intent, connection, flags) }
-                 catch (e: Exception) { log("osmAnd: bind fehlgeschlagen: $e"); false }
+                 catch (e: Exception) { log("osmAnd: bind failed: $e"); false }
         if (ok) {
             bound = true
-            log("osmAnd: Bind angefragt … (V2)")
+            log("osmAnd: bind requested … (V2)")
             main.postDelayed({ tryRegisterNav() }, 1500)
         } else {
-            log("osmAnd: nicht gefunden (Installation prüfen)")
+            log("osmAnd: not found (check installation)")
         }
     }
 
@@ -377,7 +377,7 @@ class OsmAndNavSource(
     private fun tryRegisterNav() {
         if (!bound) return
         val s = svc ?: run {
-            log("osmAnd: Service noch nicht verbunden — versuche erneut …")
+            log("osmAnd: service not connected yet — retrying …")
             main.postDelayed({ tryRegisterNav() }, 2000)
             return
         }
@@ -388,11 +388,11 @@ class OsmAndNavSource(
             val id = s.registerForNavigationUpdates(p, callback)
             if (id >= 0) {
                 navCallbackId = id
-                log("osmAnd: Nav-Updates registriert (id=$id)")
+                log("osmAnd: nav updates registered (id=$id)")
             } else {
-                log("osmAnd: id=-1 → App in OsmAnd noch nicht freigeschaltet. " +
-                    "Unser Package: ${context.packageName}. " +
-                    "OsmAnd: Menü → Plugins → \"LibreMoto\" antippen. (wiederhole …)")
+                log("osmAnd: id=-1 → app not yet enabled in OsmAnd. " +
+                    "Our package: ${context.packageName}. " +
+                    "OsmAnd: menu → plugins → tap \"LibreMoto\". (retrying …)")
                 main.postDelayed({ tryRegisterNav() }, 5000)
                 return
             }
@@ -403,13 +403,13 @@ class OsmAndNavSource(
             val rid = s.registerForRouteUpdates(rp, callback)
             if (rid >= 0) {
                 routeCallbackId = rid
-                log("osmAnd: Route-Updates registriert (id=$rid)")
+                log("osmAnd: route updates registered (id=$rid)")
             }
 
             // 3. Pull the current route geometry (if a route is already active)
             pullRouteGeometry()
         } catch (e: RemoteException) {
-            log("osmAnd: Registrierung fehlgeschlagen: $e")
+            log("osmAnd: registration failed: $e")
             main.postDelayed({ tryRegisterNav() }, 5000)
         }
     }
@@ -427,7 +427,7 @@ class OsmAndNavSource(
                 if (newVersion != routeVersion || routePoints.isEmpty()) {
                     routePoints = result.points
                     routeVersion = newVersion
-                    log("osmAnd: Route-Geometrie: ${result.points.size} Punkte, " +
+                    log("osmAnd: route geometry: ${result.points.size} points, " +
                         "${result.totalDistanceM} m total, ${result.remainingDistanceM} m rest, v=$newVersion")
                     checkRouteCoverage(result.points)
                 } else {
@@ -437,12 +437,12 @@ class OsmAndNavSource(
                 }
             } else {
                 if (routePoints.isNotEmpty()) {
-                    log("osmAnd: keine aktive Route (ok=$ok)")
+                    log("osmAnd: no active route (ok=$ok)")
                     routePoints = emptyList()
                 }
             }
         } catch (e: RemoteException) {
-            log("osmAnd: getActiveRouteGeometry fehlgeschlagen: $e")
+            log("osmAnd: getActiveRouteGeometry failed: $e")
         }
     }
 
@@ -457,11 +457,11 @@ class OsmAndNavSource(
         if (mm.loadedRegions().isEmpty()) return   // no maps → AIDL fallback, no warning spam
         val cov = mm.checkRoute(points.map { it.latitude to it.longitude })
         if (cov.covered) {
-            log("lmm: Route vollständig abgedeckt (${mm.loadedRegions().size} Regionen)")
+            log("lmm: route fully covered (${mm.loadedRegions().size} regions)")
         } else {
-            log("WARNUNG: Keine Kartendaten für die Route bei " +
+            log("WARNING: no map data for the route at " +
                 "${"%.4f".format(cov.gapLat)}, ${"%.4f".format(cov.gapLon)} — " +
-                "bitte Region in der App herunterladen! (Straßen via AIDL)")
+                "please download the region in the app! (roads via AIDL)")
         }
     }
 
@@ -530,7 +530,12 @@ class OsmAndNavSource(
         } else null
 
         if (lmmRoads != null && lmmRoads.isNotEmpty()) {
-            currentLimitKmh = nearestRoadMaxspeed(lmmRoads, centerLat, centerLon)
+            val newLimit = nearestRoadMaxspeed(lmmRoads, centerLat, centerLon)
+            if (newLimit != currentLimitKmh) {
+                log("limit: ${if (newLimit > 0) "$newLimit km/h" else "none"} " +
+                    "(road under the vehicle, ${lmmRoads.size} candidates)")
+                currentLimitKmh = newLimit
+            }
             val out = ArrayList<net.osmand.aidlapi.map.ARoadPolyline>(lmmRoads.size)
             for (r in lmmRoads) {
                 val poly = net.osmand.aidlapi.map.ARoadPolyline()
@@ -541,7 +546,7 @@ class OsmAndNavSource(
                 out.add(poly)
             }
             if (out.size != lastNearbyCount) {
-                log("lmm: ${out.size} Straßen im Fenster (von ${mm!!.loadedRegions().size} Regionen)")
+                log("lmm: ${out.size} roads in window (of ${mm!!.loadedRegions().size} regions)")
                 lastNearbyCount = out.size
             }
             nearbyRoads = out

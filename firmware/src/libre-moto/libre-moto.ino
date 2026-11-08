@@ -381,7 +381,7 @@ static void create_map_screen(void) {
 
   /* ---- caption: heading + scale text ------------------------------- */
   map_label = lv_label_create(map_screen);
-  lv_label_set_text(map_label, "Warte auf Karten-Daten…");
+  lv_label_set_text(map_label, "Waiting for map data…");
   lv_obj_set_style_text_font(map_label, &lv_font_montserrat_14, 0);
   lv_obj_set_style_text_color(map_label, C_TEXT2, 0);
   lv_obj_align(map_label, LV_ALIGN_CENTER, 0, -215);
@@ -455,12 +455,12 @@ static void create_info_screen(void) {
   info_screen = new_screen();
 
   info_title = lv_label_create(info_screen);
-  lv_label_set_text(info_title, "Angekommen \u2713");
+  lv_label_set_text(info_title, "Arrived \u2713");
   lv_obj_set_style_text_font(info_title, &lv_font_montserrat_34, 0);
   lv_obj_align(info_title, LV_ALIGN_CENTER, 0, 0);
 
   info_sub = lv_label_create(info_screen);
-  lv_label_set_text(info_sub, "Zur\u00fcck: Touch halten");
+  lv_label_set_text(info_sub, "Hold touch to go back");
   lv_obj_set_style_text_font(info_sub, &lv_font_montserrat_18, 0);
   lv_obj_set_style_text_color(info_sub, C_TEXT2, 0);
   lv_obj_align(info_sub, LV_ALIGN_CENTER, 0, 56);
@@ -535,7 +535,7 @@ static void on_nav_state(const NavState &st) {
       if (!g_splash_until_ms) goto_screen(map_screen, "map (reroute)");
     }
     reroute_hint = !reroute_hint;
-    if (reroute_hint) toast("Route wird berechnet…", C_WARN);
+    if (reroute_hint) toast("Recalculating route…", C_WARN);
     return;
   }
 
@@ -566,9 +566,9 @@ static void on_nav_state(const NavState &st) {
       app = APP_ARRIVED;
       state_until_ms = millis() + ARRIVED_TIMEOUT_MS;
       if (info_title) {
-        lv_label_set_text(info_title, "Angekommen ✓");
+        lv_label_set_text(info_title, "Arrived ✓");
         lv_obj_set_style_text_color(info_title, C_ACCENT, 0);
-        lv_label_set_text(info_sub, "Zurück: Touch halten");
+        lv_label_set_text(info_sub, "Hold touch to go back");
       }
       if (!g_splash_until_ms) goto_screen(info_screen, "arrived");
       break;
@@ -611,9 +611,9 @@ static void handle_state_timeouts(void) {
     app = APP_LOST;
     state_until_ms = now + LOST_TIMEOUT_MS;
     if (info_title) {
-      lv_label_set_text(info_title, "Verbindung getrennt");
+      lv_label_set_text(info_title, "Connection lost");
       lv_obj_set_style_text_color(info_title, C_BAD, 0);
-      lv_label_set_text(info_sub, "Warte auf Telefon…");
+      lv_label_set_text(info_sub, "Waiting for phone…");
     }
     goto_screen(info_screen, "link lost");
     Serial.println("[STATE] NAV → LOST (no data > 15 s)");

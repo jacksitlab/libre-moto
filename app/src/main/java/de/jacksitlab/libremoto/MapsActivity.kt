@@ -14,11 +14,11 @@ import android.widget.TextView
 import de.jacksitlab.libremoto.bridge.GeofabrikRegion
 import de.jacksitlab.libremoto.bridge.MapManager
 
-/** Karten-Verwaltung: Tabs (verfügbar / installiert).
- *  Der "verfügbar"-Tab drillt durch die Geofabrik-Hierarchie:
+/** Map manager: tabs (available / installed).
+ *  The "available" tab drills through the Geofabrik hierarchy:
  *  Kontinent → Land → Bundesland (wie OsmAnd). Antippen einer Region
- *  ohne Kinder startet den Download; Regionen mit Kindern öffnen die
- *  nächste Ebene (Brotkrumen + Zurück-Taste). */
+ *  childless regions start the download; regions with children open
+ *  the next level (breadcrumbs + back button). */
 class MapsActivity : Activity() {
 
     private lateinit var mapManager: MapManager
@@ -41,7 +41,7 @@ class MapsActivity : Activity() {
 
         val tabs = findViewById<TabHost>(android.R.id.tabhost)
         tabs.setup()
-        tabs.addTab(tabs.newTabSpec("avail").setIndicator("Verfügbar")
+        tabs.addTab(tabs.newTabSpec("avail").setIndicator("Available")
             .setContent(R.id.tab_available))
         tabs.addTab(tabs.newTabSpec("inst").setIndicator("Installiert")
             .setContent(R.id.tab_installed))
@@ -95,7 +95,7 @@ class MapsActivity : Activity() {
         refreshInstalled()
     }
 
-    // ---- Tab: verfügbar (Hierarchie) ---------------------------------
+    // ---- Tab: available (hierarchy) -----------------------------------
 
     private var shownRegions = listOf<GeofabrikRegion>()
 
@@ -153,7 +153,7 @@ class MapsActivity : Activity() {
             val sizeMb = mapManager.regionBytes(id) / 1048576.0
             val size = if (sizeMb >= 10.0) "%.0f MB".format(sizeMb) else "%.1f MB".format(sizeMb)
             val (status, color) = when (updateState[id]) {
-                false -> "Update verfügbar" to 0xFFB25000.toInt()   // orange-brown
+                false -> "Update available" to 0xFFB25000.toInt()   // orange-brown
                 true -> "aktuell" to 0xFF2E7D32.toInt()             // green
                 null -> "—" to 0xFF888888.toInt()                   // grey (checking)
             }
@@ -161,7 +161,7 @@ class MapsActivity : Activity() {
         }
         findViewById<TextView>(R.id.installed_hint).text =
             if (installedIds.isEmpty()) "Noch keine Karten installiert"
-            else "Antippen: Aktualisieren / Löschen"
+            else "Tap: update / delete"
         installedList.adapter = object : android.widget.BaseAdapter() {
             override fun getCount() = rows.size
             override fun getItem(pos: Int) = rows[pos]
@@ -189,13 +189,13 @@ class MapsActivity : Activity() {
     private fun showRegionActions(region: GeofabrikRegion, updateAvailable: Boolean) {
         val actions = ArrayList<String>()
         if (updateAvailable) actions.add("Aktualisieren (neue Kartendaten laden)")
-        actions.add("Löschen")
+        actions.add("Delete")
         AlertDialog.Builder(this)
             .setTitle(region.name)
             .setItems(actions.toTypedArray()) { _, which ->
                 when (actions[which]) {
                     "Aktualisieren (neue Kartendaten laden)" -> startDownload(region)
-                    "Löschen" -> confirmDelete(region)
+                    "Delete" -> confirmDelete(region)
                 }
             }
             .setNegativeButton("Abbrechen", null)
@@ -230,8 +230,8 @@ class MapsActivity : Activity() {
     private fun confirmDelete(r: GeofabrikRegion) {
         AlertDialog.Builder(this)
             .setTitle(r.name)
-            .setMessage("Region ist geladen. Löschen?")
-            .setPositiveButton("Löschen") { _, _ ->
+            .setMessage("Region is installed. Delete?")
+            .setPositiveButton("Delete") { _, _ ->
                 mapManager.deleteRegion(r.id)
                 main.postDelayed({ refreshAvailable(); refreshInstalled() }, 500)
             }

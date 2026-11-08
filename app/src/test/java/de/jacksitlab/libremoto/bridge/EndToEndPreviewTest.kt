@@ -42,8 +42,8 @@ class EndToEndPreviewTest {
         val res = OsmPbfReader.scan(pbf)
         val built = LmmBuilder.build(res)
         val map = LmmMap.load(java.io.ByteArrayInputStream(built.bytes))
-        println("Karte: ${map.roadCount} Straßen, ${built.tileCount} Kacheln, ${built.bytes.size / 1024} KB")
-        assertTrue("keine Straßen im pbf — Filter/Region prüfen", map.roadCount > 0)
+        println("map: ${map.roadCount} roads, ${built.tileCount} tiles, ${built.bytes.size / 1024} KB")
+        assertTrue("keine roads im pbf — check filter/region", map.roadCount > 0)
 
         // ---- 2. scenario: vehicle ON A REAL STREET from the map itself ----
         // No hardcoded coordinates: take the longest primary/secondary/
@@ -53,11 +53,11 @@ class EndToEndPreviewTest {
         val street = all.filter { it.highway in listOf("primary", "secondary", "residential") }
             .maxByOrNull { it.npts }
             ?: all.maxByOrNull { it.npts }
-        assertTrue("keine Straße in der Karte", street != null)
+        assertTrue("keine road in der Karte", street != null)
         street!!
         val mid = street.npts / 2
         val vehicle = LatLon(street.latE7[mid] / 1e7, street.lonE7[mid] / 1e7)
-        println("Fahrzeug: auf ${street.highway}-Straße bei " +
+        println("vehicle: on ${street.highway}-road at " +
             "${"%.5f".format(vehicle.latitude)}, ${"%.5f".format(vehicle.longitude)}")
 
         // route: continue along the street's direction (its next point)
@@ -79,9 +79,9 @@ class EndToEndPreviewTest {
         // the query the app performs per tick
         val queried = map.queryBbox(vehicle.latitude - dLat, vehicle.longitude - dLon,
                                      vehicle.latitude + dLat, vehicle.longitude + dLon)
-        println("\n=== Query ±${lookaheadM.toInt()} m um das Fahrzeug: ${queried.size} Straßen ===")
+        println("\n=== Query ±${lookaheadM.toInt()} m um das Fahrzeug: ${queried.size} roads ===")
         val byType = queried.groupBy { it.highway }.mapValues { it.value.size }
-        println("Typen im Fenster: ${byType.entries.sortedByDescending { it.value }}")
+        println("Typen in window: ${byType.entries.sortedByDescending { it.value }}")
 
         // ---- 3. THE production frame build (same code as on the road) ----
         val streets = queried.map { r ->
@@ -102,14 +102,14 @@ class EndToEndPreviewTest {
                 "erst(${seg.points.first().x},${seg.points.first().y}) " +
                 "letzt(${seg.points.last().x},${seg.points.last().y})")
         }
-        assertTrue("Frame zu groß", bytes.size <= MapFrame.MAX_FRAME)
-        assertTrue("mindestens ein Straßensegment erwartet",
+        assertTrue("frame too large", bytes.size <= MapFrame.MAX_FRAME)
+        assertTrue("mindestens ein roadssegment expected",
             frame.segments.any { it.type == de.jacksitlab.libremoto.protocol.SegmentType.Road })
 
         // ---- 5. frame.bin for the C++ firmware-pipeline renderer ----
         File(outDir, "frame.bin").writeBytes(bytes)
         println("\nframe.bin geschrieben: ${File(outDir, "frame.bin").absolutePath}")
-        println("Nächster Schritt (C++ Renderer):")
+        println("Next step (C++ renderer):")
         println("  g++ -std=c++11 -O2 -I../src/map -I../src/ble firmware/test/render_frame.cpp " +
             "-o build/render_frame && ./build/render_frame build/map-preview/frame.bin")
     }

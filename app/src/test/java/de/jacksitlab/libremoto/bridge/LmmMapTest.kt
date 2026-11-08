@@ -98,10 +98,10 @@ class LmmMapTest {
         val dLon = 400.0 / (111_320.0 * kotlin.math.cos(Math.toRadians(centerLat)))
         val found = lmm.queryBbox(centerLat - dLat, centerLon - dLon,
                                    centerLat + dLat, centerLon + dLon)
-        println("queryBbox ±400 m: ${found.size} Straßen: ${found.map { it.highway }}")
-        assertTrue("mind. 4 Straßen erwartet", found.size >= 4)
-        assertTrue("Motorway draußen", found.none { it.highway == "motorway" })
-        assertTrue("Querstraße drin", found.any { it.highway == "secondary" })
+        println("queryBbox ±400 m: ${found.size} roads: ${found.map { it.highway }}")
+        assertTrue("at least 4 roads expected", found.size >= 4)
+        assertTrue("motorway excluded", found.none { it.highway == "motorway" })
+        assertTrue("cross street included", found.any { it.highway == "secondary" })
 
         // also load the committed fixture if present (real Overpass data)
         val fixture = File("src/test/resources/test.lmm")
@@ -109,7 +109,7 @@ class LmmMapTest {
             val real = LmmMap.load(fixture.inputStream())
             val rf = real.queryBbox(centerLat - dLat, centerLon - dLon,
                                     centerLat + dLat, centerLon + dLon)
-            println("fixture: ${real.roadCount} Straßen total, query: ${rf.size}")
+            println("fixture: ${real.roadCount} roads total, query: ${rf.size}")
             assertTrue(rf.isNotEmpty())
             renderPng(File("build/map-preview/lmm-query.png"), centerLat, centerLon, rf)
         } else {

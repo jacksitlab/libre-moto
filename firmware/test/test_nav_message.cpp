@@ -72,7 +72,7 @@ int main() {
   /* --- 5: JSON string escapes --------------------------------------- */
   CHECK(P("{\"t\":\"nav\",\"text\":\"A\\\"B\\\\C/n\\tTab\"}", s), "5: escapes parse");
   CHECK(strcmp(s.text, "A\"B\\C/n\tTab") == 0, "5: decoded correctly");
-  /* ü / é via \u escapes */
+  /* non-ASCII street names via \u escapes */
   CHECK(P("{\"t\":\"nav\",\"text\":\"\u00c4\u00f6\u00dc G\u00fcnther\"}", s), "5b: \\u escapes parse");
   CHECK((unsigned char)s.text[0] == 0xC3, "5b: \xC4 decodes to UTF-8 0xC3 0x84");
   CHECK((unsigned char)s.text[1] == 0x84, "5b: ... second byte 0x84");

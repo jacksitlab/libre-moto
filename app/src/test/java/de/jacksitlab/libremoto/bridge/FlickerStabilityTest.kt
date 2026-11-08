@@ -69,12 +69,12 @@ class FlickerStabilityTest {
                 if (k !in nowSel) violations++
             }
         }
-        println("Flicker-Invariante: $violations Verletzungen von $checks Checks " +
-            "($denseSteps dichte Schritte von 20)")
+        println("Flicker-Invariante: $violations Verletzungen of $checks Checks " +
+            "($denseSteps dichte Schritte of 20)")
         // The invariant is hard: a still-candidate street must never be
         // dropped. If the spot was never dense enough to force cuts, there
         // is nothing to check (checks < 10) — skip, not fail.
-        assertTrue("Anti-Flicker-Invariante verletzt: $violations von $checks Straßen verloren",
+        assertTrue("anti-flicker invariant violated: $violations of $checks roads verloren",
             violations == 0 || checks < 10)
     }
 

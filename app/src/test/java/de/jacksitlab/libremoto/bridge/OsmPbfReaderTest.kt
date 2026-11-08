@@ -25,14 +25,14 @@ class OsmPbfReaderTest {
         val t0 = System.currentTimeMillis()
         val res = OsmPbfReader.scan(pbf)
         val tParse = System.currentTimeMillis() - t0
-        println("pbf: ${res.ways.size} Straßen, ${res.nodeCount()} referenzierte Nodes in ${tParse} ms")
-        assertTrue("erwartet > 1000 Straßen, got ${res.ways.size}", res.ways.size > 1000)
+        println("pbf: ${res.ways.size} roads, ${res.nodeCount()} referenced Nodes in ${tParse} ms")
+        assertTrue("expected > 1000 roads, got ${res.ways.size}", res.ways.size > 1000)
 
         val t1 = System.currentTimeMillis()
         val built = LmmBuilder.build(res)
         val tBuild = System.currentTimeMillis() - t1
-        println("lmm: ${built.roadCount} Straßen, ${built.tileCount} Kacheln, " +
-                "${built.bytes.size / 1024} KB, ${built.droppedIncomplete} unvollständig verworfen (${tBuild} ms)")
+        println("lmm: ${built.roadCount} roads, ${built.tileCount} tiles, " +
+                "${built.bytes.size / 1024} KB, ${built.droppedIncomplete} incomplete dropped (${tBuild} ms)")
 
         // load + query: Vaduz centre
         val map = LmmMap.load(ByteArrayInputStream(built.bytes))
@@ -41,8 +41,8 @@ class OsmPbfReaderTest {
         val t2 = System.currentTimeMillis()
         val roads = map.queryBbox(47.10, 9.50, 47.16, 9.54)
         val tQuery = System.currentTimeMillis() - t2
-        println("query Vaduz: ${roads.size} Straßen in ${tQuery} ms")
-        assertTrue("erwartet Straßen in Vaduz, got ${roads.size}", roads.size > 50)
+        println("query Vaduz: ${roads.size} roads in ${tQuery} ms")
+        assertTrue("expected roads in Vaduz, got ${roads.size}", roads.size > 50)
 
         // sanity: query returns plausible types
         val types = roads.map { it.highway }.toSet()

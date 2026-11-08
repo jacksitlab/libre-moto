@@ -15,7 +15,7 @@ import android.content.Context
  *    4 — + build stamp line at the bottom
  *    5 — maps/log as FILLED buttons 56 dp (borderless vanished on Samsung)
  *    6 — overflow menu (drei Punkte) via transparent Toolbar
- *    7 — maps view: tabs (verfügbar/installiert) + Geofabrik hierarchy
+ *    7 — maps view: tabs (available/installed) + Geofabrik hierarchy
  *    8 — menu as explicit ⋮ button + PopupMenu (Toolbar failed on Samsung)
  *    9 — maps: sizes on installed tab + Geofabrik md5 update check
  *   10 — installed tab as table: name/status/size columns, zebra rows,

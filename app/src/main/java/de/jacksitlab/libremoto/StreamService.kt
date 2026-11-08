@@ -69,7 +69,7 @@ class StreamService : Service() {
     override fun onCreate() {
         super.onCreate()
         createChannel()
-        val notif = buildNotification("Stream läuft")
+        val notif = buildNotification("Stream running")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForeground(NOTIF_ID, notif)
         } else {

@@ -129,7 +129,7 @@ object FrameBuilder {
             } else culled++
         }
         if (log != null && culled > 0 && corridorStreets.size + culled > 8) {
-            log("korridor: ${corridorStreets.size} relevant, $culled verworfen (${corridorM.toInt()} m)")
+            log("corridor: ${corridorStreets.size} relevant, $culled culled (${corridorM.toInt()} m)")
         }
         val candidates = corridorStreets
 
@@ -307,7 +307,7 @@ object FrameBuilder {
             }
         }
         prevFrameStreetKeys = sentAnchors
-        log?.invoke("frame: route + ${totalSegs - 1} Straßen " +
+        log?.invoke("frame: route + ${totalSegs - 1} roads " +
             "(${segments.sumOf { it.points.size }} pts, ${budgetBytes}B Budget restlich)")
         return MapFrame(
             seq = seq,
