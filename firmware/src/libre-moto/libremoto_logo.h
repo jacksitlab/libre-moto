@@ -1,4 +1,4 @@
-/* LibreMoto logo (wordmark) — generated from docs/logo.svg. */
+/* LibreMoto logo (wordmark) — GENERATED from docs/logo.svg. */
 #ifndef LIBREMOTO_LOGO_H
 #define LIBREMOTO_LOGO_H
 #include <stdint.h>

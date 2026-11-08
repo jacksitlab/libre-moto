@@ -258,6 +258,10 @@ inline bool parse_object(Cursor &c, struct NavState *out) {
       double v; if (!parse_number(c, v)) return false;
       if (v < 0 || v > 300) return false;
       out->limit_kmh = (int)v;
+    } else if (strcmp(key, "speed_kmh") == 0) {
+      double v; if (!parse_number(c, v)) return false;
+      if (v < 0 || v > 300) return false;
+      out->speed_kmh = (int)v;
     } else if (strcmp(key, "batt_pct") == 0) {
       double v; if (!parse_number(c, v)) return false;
       if (v < 0 || v > 100) return false;
@@ -296,6 +300,7 @@ inline bool validate(const char *json, size_t len, struct NavState *out) {
   struct NavState fresh;
   memset(&fresh, 0, sizeof fresh);
   fresh.batt_pct = -1;
+  fresh.speed_kmh = -1;
   fresh.msg_type = NAV_MSG_NONE;
 
   Cursor c;

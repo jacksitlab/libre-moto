@@ -1,8 +1,8 @@
 # Libre-Moto
 
-Open-source alternative to [Beeline Moto II](https://beeline.co/pages/beeline-moto) — a navigation/map display for motorcycle handlebars, built on the **ESP32-S3 + round touch display** hardware (CrowPanel 2.1" 480×480, ST7701S, CST816 touch). All input is **touch** (tap / hold / swipe) — this board revision has no rotary knob.
+An open-source navigation/map display for motorcycle handlebars, built on the **ESP32-S3 + round touch display** hardware (CrowPanel 2.1" 480×480, ST7701S, CST816 touch). All input is **touch** (tap / hold / swipe) — this board revision has no rotary knob.
 
-The display receives navigation data (turn instructions + a minimalistic vector map) via **Bluetooth Low Energy** from a smartphone (osmAnd + companion app) and shows them **glove-friendly** and **without distraction** — in the style of Beeline Moto II.
+The display receives navigation data (turn instructions + a minimalistic vector map) via **Bluetooth Low Energy** from a smartphone (osmAnd + companion app) and shows them **glove-friendly** and **without distraction**, with a minimalist interface that keeps the focus on the road.
 
 The board ships with a **serial self-test** (`mt0`–`mt3`) that drives the full BLE pipeline from a terminal, so you can verify the map renderer, state machine, and touch UI without a phone. See `firmware/README_TESTS.md`.
 
@@ -154,7 +154,8 @@ The Arduino IDE project is the `firmware/src/libre-moto` folder (the `.ino` file
 - BLE: classic **Bluedroid API** shipped with [esp32-arduino](https://github.com/espressif/arduino-esp32) core ≥ 3.3 (see `firmware/src/ble/ble_link.h`)
 - Touch: [Adafruit CST8XX](https://github.com/adafruit/Adafruit_CST8XX)
 - Navigation engine: [osmAnd](https://osmand.net)
-- Design reference: [Beeline Moto II](https://beeline.co/pages/beeline-moto)
+
+"Beeline" and "Beeline Moto II" are trademarks of their respective owners. Libre-Moto is an independent project and is not affiliated with, endorsed by, or sponsored by Beeline.
 
 ## Issues & contributing
 

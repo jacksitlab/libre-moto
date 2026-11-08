@@ -7,7 +7,8 @@
  * Implements protocol v1, section 2 (docs/protocol.md):
  *   { "v":1, "t":"nav|idle|reroute|arrived|beep",
  *     "maneuver":"left|right|straight|uturn|merge|slight_left|slight_right",
- *     "text":"<<=24 chars>", "dist_m":350, "limit_kmh":50, "batt_pct":87,
+ *     "text":"<<=24 chars>", "dist_m":350, "limit_kmh":50, "speed_kmh":72,
+ *     "batt_pct":87,
  *     "map_on":true, "ts":1719792000000 }
  *
  * Contract:
@@ -50,6 +51,7 @@ struct NavState {
   char     text[48];    /* short label, protocol max 24 chars + headroom */
   int      dist_m;      /* meters to maneuver, 0 = not provided */
   int      limit_kmh;   /* speed limit, 0 = not provided */
+  int      speed_kmh;   /* current speed km/h, -1 = not provided */
   int      batt_pct;    /* phone battery %, -1 = not provided */
   bool     map_on;      /* phone requests map view */
   uint64_t ts;          /* phone timestamp, epoch ms */

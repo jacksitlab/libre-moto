@@ -207,6 +207,13 @@ class OsmAndNavSource(
 
     override val isNavigating: Boolean get() = bound && navActive
 
+    /** Smoothed heading degrees × 10 — the map ROTATES by this, so raw
+     *  GPS bearing jitter (±5-10°) made the whole map snap every frame.
+     *  EMA over the shortest angular path + a capped turn rate per tick
+     *  (max 1.5°/tick at 2 Hz = 3°/s) let the view ease into turns. */
+    @Volatile private var smoothHeadingDeg10 = 0
+    @Volatile private var smoothHeadingValid = false
+
     /** Last GPS bearing in degrees × 10 (for MapFrame heading).
      *  Updated by refresh() from the Android LocationManager. */
     @Volatile private var headingDeg10: Int = 0
@@ -217,11 +224,27 @@ class OsmAndNavSource(
             pullRouteGeometry()
         }
 
-        // 2. Compute bearing from the route polyline
+        // 2. Compute bearing from the route polyline — SMOOTHED: the raw
+        //    bearing wobbles with GPS noise; feeding it straight into the
+        //    frame rotation made the map snap on every frame.
         val pts = routePoints
         if (pts.size >= 2) {
-            val bearing = bearingFromPolyline(pts)
-            headingDeg10 = (bearing * 10).toInt() % 3600
+            val raw = ((bearingFromPolyline(pts) * 10).toInt() % 3600 + 3600) % 3600
+            if (!smoothHeadingValid) {
+                smoothHeadingDeg10 = raw
+                smoothHeadingValid = true
+            } else {
+                // shortest angular delta raw - smooth
+                var d = raw - smoothHeadingDeg10
+                if (d > 1800) d -= 3600
+                else if (d < -1800) d += 3600
+                // EMA (alpha 0.5) + turn-rate cap 45 (=4.5°/tick at
+                // 5 Hz = 22°/s): real curves settle in ~2-4 s while
+                // still filtering GPS bearing noise
+                val step = (d * 0.5).toInt().coerceIn(-45, 45)
+                smoothHeadingDeg10 = ((smoothHeadingDeg10 + step) % 3600 + 3600) % 3600
+            }
+            headingDeg10 = smoothHeadingDeg10
         }
 
         // 2b. Speed from vehicle movement (routePoints[0] = position, 1 Hz ticks)
@@ -310,6 +333,7 @@ class OsmAndNavSource(
             distM = distanceToM,
             limitKmh = if (currentLimitKmh > 0) currentLimitKmh else null,
             mapOn = true,
+            speedKmh = smoothedSpeedKmh.toInt().coerceIn(0, 255),
         )
     }
 
@@ -587,7 +611,7 @@ class OsmAndNavSource(
 
     /** NearbyRoads pull interval — see refresh(). */
     private companion object {
-        const val NEARBY_INTERVAL_MS = 3000L
+        const val NEARBY_INTERVAL_MS = 1000L
         /** .lmm query interval (in-memory, ~40 ms — much cheaper than AIDL). */
         const val LMM_INTERVAL_MS = 1000L
     }

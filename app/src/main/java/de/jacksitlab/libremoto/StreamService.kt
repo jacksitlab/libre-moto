@@ -98,7 +98,7 @@ class StreamService : Service() {
         val t = Thread {
             while (running) {
                 try { pumpOnce() } catch (e: Exception) { Log.d(TAG, "pump: ${e.message}") }
-                try { pumpSleep.tryAcquire(1000, java.util.concurrent.TimeUnit.MILLISECONDS) } catch (_: InterruptedException) { break }
+                try { pumpSleep.tryAcquire(200, java.util.concurrent.TimeUnit.MILLISECONDS) } catch (_: InterruptedException) { break }
             }
         }
         t.name = "LibreMoto-pump"
@@ -150,7 +150,7 @@ class StreamService : Service() {
             }
         }
         // once a minute: TX health (callbacks vs pacing, queue depth)
-        if (++tickCounter % 60 == 0) ble?.txStats()?.let { Log.d(TAG, it) }
+        if (++tickCounter % 300 == 0) ble?.txStats()?.let { Log.d(TAG, it) }
     }
 
     private var tickCounter = 0

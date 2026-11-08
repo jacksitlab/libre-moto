@@ -138,7 +138,7 @@ class MapProjectorTest {
         assertEquals(24, east[0].x)
         // clamping: 10 km north at scale 48 → 4800 px → clamped to -AHEAD_PX
         val far = MapProjector.projectPolyline(vehicle, listOf(at(10_000.0, 0.0)), 48)
-        assertEquals(-320, far[0].y)
+        assertEquals(-480, far[0].y)
         // rotation 0° north: point north of vehicle maps to vehicle pos - y
         val rot = MapProjector.rotateForDisplay(listOf(Point(0, -100)), 0.0)
         assertEquals(240, rot[0].x); assertEquals(220, rot[0].y)   // 320-100

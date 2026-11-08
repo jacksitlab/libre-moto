@@ -36,6 +36,7 @@ data class NavData(
     val limitKmh: Int? = null,
     val battPct: Int? = null,
     val mapOn: Boolean? = null,
+    val speedKmh: Int? = null,
     val tsMs: Long = System.currentTimeMillis(),
 ) {
     fun toJson(): String {
@@ -49,6 +50,7 @@ data class NavData(
         limitKmh?.let { sb.append(",\"limit_kmh\":").append(it) }
         battPct?.let { sb.append(",\"batt_pct\":").append(it) }
         mapOn?.let { sb.append(",\"map_on\":").append(it) }
+        speedKmh?.let { sb.append(",\"speed_kmh\":").append(it) }
         sb.append(",\"ts\":").append(tsMs).append('}')
         return sb.toString()
     }

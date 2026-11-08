@@ -11,6 +11,7 @@
 #include "../ble/ble_link.h"   /* GATT server: NavData/Status/MapData/Control         */
 #include "../map/map_frame.h"  /* MapData binary frames (protocol.md §4)              */
 #include "../map/map_render.h" /* prepare_map_frame(): geometry stage (comm thread)   */
+#include "../map/map_blit.h"   /* full-frame software renderer (replaces the line pool) */
 #include "libremoto_icon.h"    /* the LibreMoto mark (generated from docs/icon.svg)    */
 #include "libremoto_logo.h"    /* the wordmark (generated from docs/logo.svg)         */
 #include "maneuver_icons.h"   /* maneuver arrows (generated from docs/assets/maneuvers) */
@@ -31,18 +32,21 @@ static const lv_image_dsc_t libremoto_icon = {
   .data = libremoto_icon_map,
 };
 
-/* LVGL 9 image descriptor for the wordmark (ARGB8888, 480×188). */
+/* LVGL 9 image descriptor for the wordmark — I8 INDEXED (256-entry
+ * ARGB8888 palette inside the data, then 1 byte per pixel). The logo
+ * is 3 colors + antialiasing edges; indexed storage cuts 360 KB down
+ * to 91 KB of flash. The bin decoder expands palette lines on draw. */
 static const lv_image_dsc_t libremoto_logo = {
   .header = {
     .magic = LV_IMAGE_HEADER_MAGIC,
-    .cf = LV_COLOR_FORMAT_ARGB8888,
+    .cf = LV_COLOR_FORMAT_I8,
     .flags = 0,
     .w = 480,
     .h = 188,
-    .stride = 480 * 4,
+    .stride = 480,          /* 1 byte per pixel */
     .reserved_2 = 0,
   },
-  .data_size = 480 * 188 * 4,
+  .data_size = 256 * 4 + 480 * 188,
   .data = libremoto_logo_map,
 };
 
@@ -87,6 +91,17 @@ static const lv_image_dsc_t vehicle_icon = {
 };
 
 /** Wire keyword → icon descriptor (NULL = unknown → straight). */
+/** Wire keyword → raw ARGB8888 map (48×48) for map_blit_vehicle. */
+static const uint8_t *maneuver_icon_map(const char *dir) {
+  if      (!strcmp(dir, "left"))          return maneuver_left_map;
+  else if (!strcmp(dir, "right"))       return maneuver_right_map;
+  else if (!strcmp(dir, "uturn"))       return maneuver_uturn_map;
+  else if (!strcmp(dir, "merge"))       return maneuver_merge_map;
+  else if (!strcmp(dir, "slight_left")) return maneuver_slight_left_map;
+  else if (!strcmp(dir, "slight_right")) return maneuver_slight_right_map;
+  else                                   return maneuver_straight_map;
+}
+
 static const lv_image_dsc_t *maneuver_icon(const char *dir) {
   if      (!strcmp(dir, "left"))        return &maneuver_icon_left;
   else if (!strcmp(dir, "right"))       return &maneuver_icon_right;
@@ -127,7 +142,11 @@ static lv_obj_t *map_screen = NULL;
    44 = 20 roads × (casing+fill) + route + destination + margin — the
    ESP32 line budget for the two-pass casing+fill render. */
 #define MAP_POOL      44
-static lv_obj_t *map_lines[MAP_POOL];
+static uint16_t *g_map_fb = NULL;       /* 480×480 RGB565, PSRAM — the map's own framebuffer */
+#define MAP_CX 240   /* vehicle marker x (one third from the bottom) */
+#define MAP_CY 320   /* vehicle marker y */
+static lv_obj_t *map_img = NULL;        /* the map as ONE image object (cheap redraws) */
+static lv_image_dsc_t g_map_fb_dsc;     /* descriptor over g_map_fb (RGB565) */
 static lv_obj_t *map_vehicle = NULL;        /* vehicle marker icon (SVG) */
 static lv_obj_t *map_marker = NULL;    /* destination marker (rotating frame) */
 static lv_obj_t *map_scale = NULL;     /* scale bar line */
@@ -250,17 +269,28 @@ Arduino_RGB_Display *gfx = new Arduino_RGB_Display(
  * LVGL display output
  *--------------------------------------------------------------*/
 
+extern uint32_t diag_flush_ms;
+/* Scratch line for the R/B swap: in DIRECT mode px_map IS the display
+ * framebuffer (our PSRAM map fb) — swapping in place would corrupt the
+ * map for every subsequent LVGL read (white flicker). Swap into a
+ * scratch line buffer instead, one row at a time. 480 px = 960 B. */
+static uint16_t s_flush_scratch[SCREEN_W];
+
 void my_disp_flush(lv_display_t *display, const lv_area_t *area, uint8_t *px_map) {
-  uint32_t w = (area->x2 - area->x1 + 1);
-  uint32_t h = (area->y2 - area->y1 + 1);
+  const uint32_t w = (area->x2 - area->x1 + 1);
+  const uint32_t h = (area->y2 - area->y1 + 1);
   /* This ST7701 wiring needs the R/B 5-bit fields swapped. */
-  uint16_t *pixels = (uint16_t *)px_map;
-  const uint32_t pixel_count = w * h;
-  for (uint32_t i = 0; i < pixel_count; ++i) {
-    const uint16_t c = pixels[i];
-    pixels[i] = (c & 0x07E0) | ((c & 0x001F) << 11) | ((c & 0xF800) >> 11);
+  const uint16_t *src = (const uint16_t *)px_map;
+  for (uint32_t y = 0; y < h; ++y) {
+    const uint16_t *srow = src + (size_t)y * w;
+    uint16_t *drow = s_flush_scratch;
+    const uint16_t *dend = drow + w;
+    while (drow < dend) {
+      const uint16_t c = *srow++;
+      *drow++ = (uint16_t)((c & 0x07E0) | ((c & 0x001F) << 11) | ((c & 0xF800) >> 11));
+    }
+    gfx->draw16bitRGBBitmap(area->x1, area->y1 + (int16_t)y, s_flush_scratch, w, 1);
   }
-  gfx->draw16bitRGBBitmap(area->x1, area->y1, pixels, w, h);
   lv_display_flush_ready(display);
 }
 
@@ -339,23 +369,43 @@ static void create_home_screen(void) {
 
 static void create_map_screen(void) {
   map_screen = new_screen();
+  /* DIRECT mode (verified headless): the screen bg must be OPAQUE
+     BLACK. A transparent bg makes LVGL fill the invalidated regions
+     WHITE (white screen!). With opaque black the semantics are:
+     - screen switch → one full refresh fills black (fine)
+     - map_blit paints the map into the fb AFTER that
+     - overlay changes invalidate ONLY their own regions; LVGL fills
+       those black and draws the (opaque) overlay on top — the map
+       pixels everywhere else are never touched. */
+  lv_obj_set_style_bg_color(map_screen, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(map_screen, LV_OPA_COVER, 0);
 
-  /* ---- segment pool: MAP_POOL lines, created once ------------------
-   * Per frame we only refill points[0..2] + size + visibility — no
-   * object churn at 2 Hz. Points live in a static buffer per line. */
-  /* shared static placeholder: the pool starts hidden, and every visible
-     line gets its own valid map_pts[] pointer on the first frame.
-     (A local array here would dangle once this function returns.) */
-  static lv_point_precise_t map_pts_placeholder[1];
-  map_pts_placeholder[0].x = 0;
-  map_pts_placeholder[0].y = 0;
-  for (int i = 0; i < MAP_POOL; i++) {
-    map_lines[i] = lv_line_create(map_screen);
-    lv_line_set_points(map_lines[i], map_pts_placeholder, 1);
-    lv_obj_remove_flag(map_lines[i], (lv_obj_flag_t)((lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN)));
-    lv_obj_add_flag(map_lines[i], LV_OBJ_FLAG_HIDDEN);
-    /* Z-order = creation order (LVGL 9): roads first, then the vehicle
-       + marker created after the pool are drawn on top. */
+  /* ---- the map itself: ONE image object over a PSRAM framebuffer ----
+   * Replaces the 44-object lv_line pool: the SW renderer needed ~150 ms
+   * per full redraw; map_blit paints the same geometry directly into
+   * g_map_fb (~10-20 ms) and LVGL only blits one image. Created FIRST
+   * so all overlays (vehicle, marker, band, sign) draw on top. */
+  if (g_map_fb) {
+    memset(&g_map_fb_dsc, 0, sizeof g_map_fb_dsc);
+    g_map_fb_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+    g_map_fb_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+    g_map_fb_dsc.header.w = SCREEN_W;
+    g_map_fb_dsc.header.h = SCREEN_H;
+    g_map_fb_dsc.header.stride = SCREEN_W * 2;
+    g_map_fb_dsc.data_size = (uint32_t)SCREEN_W * SCREEN_H * 2;
+    g_map_fb_dsc.data = (const uint8_t *)g_map_fb;
+    /* clear once so the first frame isn't garbage */
+    for (size_t i = 0; i < (size_t)SCREEN_W * SCREEN_H; i++) g_map_fb[i] = 0;
+    /* DIRECT mode: no image object — the fb is the display buffer and
+       map_blit paints straight into it. */
+    Serial.println("[MAP] full-frame renderer: DIRECT fb mode");
+  } else {
+    /* PARTIAL fallback: a 480×480 RGB565 fb needs 450 KB — ONLY PSRAM
+       can hold it. Without PSRAM (board option 'PSRAM: op' not set in
+       the Arduino IDE!) there is NO map: the full-frame renderer needs
+       the fb. Fail LOUDLY at boot instead of a silent black map. */
+    Serial.println("[MAP] FATAL: no PSRAM — enable 'PSRAM: OPI PSRAM' in the");
+    Serial.println("[MAP]        board options (Tools menu) and re-flash!");
   }
 
   /* ---- vehicle marker: SVG-rendered icon (docs/assets/vehicle.svg),
@@ -400,6 +450,7 @@ static void create_map_screen(void) {
   lv_obj_set_style_text_color(map_label, C_TEXT2, 0);
   lv_obj_align(map_label, LV_ALIGN_CENTER, 0, -215);
   lv_obj_remove_flag(map_label, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
+  lv_obj_add_flag(map_label, LV_OBJ_FLAG_HIDDEN);
 
   /* ---- nav info panel (bottom, Beeline style): maneuver arrow +
      distance on a semi-transparent dark panel below the vehicle marker,
@@ -412,17 +463,24 @@ static void create_map_screen(void) {
   lv_obj_align(map_nav_panel, LV_ALIGN_BOTTOM_LEFT, 0, 0);
   lv_obj_set_style_radius(map_nav_panel, 0, 0);
   lv_obj_set_style_bg_color(map_nav_panel, lv_color_black(), 0);
-  lv_obj_set_style_bg_opa(map_nav_panel, LV_OPA_60, 0);   /* semi-transparent */
+  lv_obj_set_style_bg_opa(map_nav_panel, LV_OPA_60, 0);   /* semi-transparent (Beeline style) */
   lv_obj_set_style_border_width(map_nav_panel, 0, 0);
   lv_obj_remove_flag(map_nav_panel, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
 
-  map_nav_arrow = lv_img_create(map_nav_panel);
+  map_nav_arrow = lv_img_create(map_screen);
   lv_img_set_src(map_nav_arrow, &maneuver_icon_straight);
   lv_img_set_antialias(map_nav_arrow, true);
   lv_obj_align(map_nav_arrow, LV_ALIGN_CENTER, -95, 0);
   lv_obj_remove_flag(map_nav_arrow, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
 
-  map_nav_dist = lv_label_create(map_nav_panel);
+  /* band + sign are painted by map_blit; hide the LVGL objects so
+     they don't streak — their LABELS (children) stay visible and are
+     repositioned onto the painted areas. */
+  lv_obj_add_flag(map_nav_panel, LV_OBJ_FLAG_HIDDEN);
+
+  lv_obj_add_flag(map_nav_arrow, LV_OBJ_FLAG_HIDDEN);
+
+  map_nav_dist = lv_label_create(map_screen);
   lv_label_set_text(map_nav_dist, "\u2014");
   lv_obj_set_style_text_font(map_nav_dist, &lv_font_montserrat_34, 0);
   lv_obj_set_style_text_color(map_nav_dist, C_TEXT, 0);
@@ -430,8 +488,11 @@ static void create_map_screen(void) {
      regardless of the label width: '50 m' vs '1.2 km') */
   lv_obj_align_to(map_nav_dist, map_nav_arrow, LV_ALIGN_OUT_RIGHT_MID, 16, 0);
   lv_obj_remove_flag(map_nav_dist, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
+  lv_obj_add_flag(map_nav_dist, LV_OBJ_FLAG_HIDDEN);
 
 
+  /* speed limit sign: painted by map_blit_limit_sign; only the
+     NUMBER stays an LVGL label (small region inside the sign) */
   /* speed limit sign: white circle, red ring, number inside */
   map_limit = lv_obj_create(map_screen);
   lv_obj_remove_style_all(map_limit);
@@ -448,6 +509,10 @@ static void create_map_screen(void) {
      the visible circle (verified geometrically). */
   lv_obj_set_pos(map_limit, 360 - 32, 120 - 32);
   lv_obj_remove_flag(map_limit, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
+  /* the SIGN is painted by map_blit; keep the LVGL object hidden
+     (added AFTER creation — hiding earlier dereferenced NULL and
+     crashed the boot, reset_reason=11) */
+  lv_obj_add_flag(map_limit, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(map_limit, LV_OBJ_FLAG_HIDDEN);          /* shown when limit > 0 */
 
   map_limit_label = lv_label_create(map_screen);
@@ -457,6 +522,7 @@ static void create_map_screen(void) {
   lv_obj_add_flag(map_limit_label, LV_OBJ_FLAG_IGNORE_LAYOUT);
   lv_obj_align_to(map_limit_label, map_limit, LV_ALIGN_CENTER, 0, 0);
   lv_obj_remove_flag(map_limit_label, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
+  lv_obj_add_flag(map_limit_label, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(map_limit_label, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -512,27 +578,11 @@ static void render_nav_from_state(void) {
      glued to the RIGHT of the arrow (align_to, not a fixed offset) */
     lv_obj_align_to(map_nav_dist, map_nav_arrow, LV_ALIGN_OUT_RIGHT_MID, 16, 0);
   }
-  /* speed limit sign (top right): shown only when the app provides one */
-  bool showLimit = g_nav.limit_kmh > 0;
-  if (map_limit) {
-    if (showLimit) {
-      lv_obj_remove_flag(map_limit, LV_OBJ_FLAG_HIDDEN);
-      lv_obj_remove_flag(map_limit_label, LV_OBJ_FLAG_HIDDEN);
-      char s[8];
-      snprintf(s, sizeof s, "%d", g_nav.limit_kmh);
-      lv_label_set_text(map_limit_label, s);
-      /* fit the number inside the 64 px circle: 3 digits need a
-       * smaller font than 2 (e.g. 130 km/h on the motorway) */
-      const lv_font_t *f = (g_nav.limit_kmh >= 100) ? &lv_font_montserrat_24
-                             : (g_nav.limit_kmh >= 10)  ? &lv_font_montserrat_34
-                             : &lv_font_montserrat_40;
-      lv_obj_set_style_text_font(map_limit_label, f, 0);
-      lv_obj_align_to(map_limit_label, map_limit, LV_ALIGN_CENTER, 0, 0);
-    } else {
-      lv_obj_add_flag(map_limit, LV_OBJ_FLAG_HIDDEN);
-      lv_obj_add_flag(map_limit_label, LV_OBJ_FLAG_HIDDEN);
-    }
-  }
+  /* speed limit: the SIGN is painted by map_blit_limit_sign (part of
+     the frame); only the NUMBER is an LVGL label inside it. */
+  /* the limit number is painted into the frame by render_map_display
+     (map_blit_text); the LVGL label stays hidden forever — un-hiding
+     it here made it race the panel scan again (flickering sign). */
 }
 
 /* Apply a freshly parsed NavState to the state machine + UI. */
@@ -720,52 +770,203 @@ static void on_ble_nav(const void *data, size_t len) {
  * Runs on the app core (ble_link_poll drains the queue). */
 
 /* per-line point buffers: mutable so lv_line keeps our pointer (no malloc at 2 Hz) */
-static lv_point_precise_t map_pts[MAP_POOL][MAP_MAX_PTS];
 
-/* Blit a PREPARED frame into the LVGL line pool (DISPLAY thread only).
-   Reads a published MapRenderFrame snapshot — no geometry math here.
-   Z-order = creation order (LVGL 9): ALL road casings first, then ALL
-   road fills, then destination, route last (top) — the classic two-pass
-   casing+fill scheme (OSM-Carto/Mapnik style). Overlapping streets merge
-   into one white band first; the dark fills on top leave white visible
-   only where no street covers — "black line with white border", and
-   crossings join seamlessly without any geometry union.
-   Style per line type:
-     road/branch casing → fill width + 2 px, WHITE (the border)
-     road/branch fill   → fill width px, C_BG (the black body)
-     destination        → 4 px accent
-     route              → fat white, rounded (high contrast on black roads) */
-static void render_map_display(const MapRenderFrame *rf) {
-  for (int i = 0; i < rf->line_count && i < MAP_POOL; i++) {
-    const MapRenderLine *ln = &rf->lines[i];
-    lv_obj_t *line = map_lines[i];
-    for (int p = 0; p < ln->npts; p++) {
-      map_pts[i][p].x = (lv_value_precise_t)ln->pts[p * 2 + 0];
-      map_pts[i][p].y = (lv_value_precise_t)ln->pts[p * 2 + 1];
-    }
-    lv_line_set_points(line, map_pts[i], (uint32_t)ln->npts);
-    lv_obj_set_size(line, 480, 480);   /* points line-local → anchor at (0,0) */
-    lv_obj_align(line, LV_ALIGN_TOP_LEFT, 0, 0);
-    if (ln->type == MAP_SEG_ROAD || ln->type == MAP_SEG_BRANCH) {
-      if (ln->casing) {
-        lv_obj_set_style_line_width(line, ln->width, 0);
-        lv_obj_set_style_line_color(line, C_TEXT, 0);    /* white border  */
-      } else {
-        lv_obj_set_style_line_width(line, ln->width, 0);
-        lv_obj_set_style_line_color(line, C_BG, 0);      /* black body    */
-      }
-    } else if (ln->type == MAP_SEG_DESTINATION) {
-      lv_obj_set_style_line_width(line, 4, 0);
-      lv_obj_set_style_line_color(line, C_ACCENT, 0);
-    } else { /* MAP_SEG_ROUTE */
-      lv_obj_set_style_line_width(line, ln->width, 0);   /* fat filled look */
-      lv_obj_set_style_line_color(line, C_TEXT, 0);      /* white on black roads */
-    }
-    lv_obj_set_style_line_rounded(line, true, 0);
-    lv_obj_remove_flag(line, LV_OBJ_FLAG_HIDDEN);
+/* ---- Dead reckoning between frames --------------------------------
+ * Real frames arrive at 5 Hz (200 ms); the display paints 11-15 fps.
+ * Between two real frames the world DRIFTS DOWN by the distance the
+ * vehicle covered: dr_tick (75 ms) repaints the last geometry with a
+ * growing offset and memcpys it to the panel — the map appears to
+ * move at the repaint rate (~13 fps) instead of the transfer rate.
+ * A real frame resets the offset (its geometry is exact). */
+static void dr_repaint(const MapRenderFrame *rf, int dy);
+static bool     g_dr_have = false;
+static int32_t  g_dr_dy = 0;      /* accumulated drift since the last REAL frame */
+static uint32_t g_dr_last_ms = 0;
+static int32_t  g_dr_px_s = 0;             /* world drift, px/s */
+#define DR_TICK_MS 75
+
+/* full repaint of the last frame with offset dy — same composition as
+   render_map_display (band, sign, markers, texts) so the picture is
+   complete; only the world lines move. */
+static void dr_repaint(const MapRenderFrame *rf, int dy) {
+  static uint16_t *panel_fb = nullptr;
+  if (panel_fb == nullptr) panel_fb = (uint16_t *)gfx->getFramebuffer();
+  if (!panel_fb || !g_map_fb || !rf) return;
+  map_blit_init(g_map_fb);
+  map_blit_frame_dy(rf, dy);
+  map_blit_band();
+  map_blit_limit_sign(g_nav.limit_kmh > 0);
+  if (rf->show_vehicle)
+    map_blit_vehicle(vehicle_icon_map, MAP_CX, MAP_CY, 64);
+  if (rf->marker_visible)
+    map_blit_marker(rf->marker_x, rf->marker_y + dy);
+  /* maneuver icon + distance: repainted identically (band content
+     does not drift with the world) */
+  {
+    char d[16];
+    if (g_nav.dist_m >= 1000)
+      snprintf(d, sizeof d, "%d.%d km", g_nav.dist_m / 1000, (g_nav.dist_m % 1000) / 100);
+    else if (g_nav.dist_m > 0)
+      snprintf(d, sizeof d, "%d m", g_nav.dist_m);
+    else
+      snprintf(d, sizeof d, "--");
+    const int band_y = SCREEN_H - 84;
+    const lv_font_t *f = &lv_font_montserrat_34;
+    const int icon_w = 48, gap = 16;
+    const int text_w = (int)(strlen(d) * (f->line_height / 2));
+    const int group_w = icon_w + gap + text_w;
+    const int gx0 = (SCREEN_W - group_w) / 2;
+    map_blit_vehicle(maneuver_icon_map(g_nav.maneuver[0] ? g_nav.maneuver : "straight"),
+                     gx0 + icon_w / 2, band_y + 42, 48);
+    map_blit_text_lv((void *)f, d, gx0 + icon_w + gap,
+                     band_y + 42 - f->line_height / 2, 0xFFFF);
   }
-  for (int i = rf->line_count; i < MAP_POOL; i++)
-    lv_obj_add_flag(map_lines[i], LV_OBJ_FLAG_HIDDEN);
+  if (g_nav.limit_kmh > 0) {
+    char s[8];
+    snprintf(s, sizeof s, "%d", g_nav.limit_kmh);
+    const lv_font_t *f = (g_nav.limit_kmh >= 100) ? &lv_font_montserrat_24
+                           : &lv_font_montserrat_34;
+    const int w = (int)strlen(s) * (f->line_height / 2);
+    map_blit_text_lv((void *)f, s, 360 - w / 2, 120 - f->line_height / 2, 0x0000);
+  }
+  memcpy(panel_fb, g_map_fb, (size_t)SCREEN_W * SCREEN_H * 2);
+}
+
+static void dr_tick_cb(lv_timer_t *t) {
+  (void)t;
+  if (!g_dr_have || active_screen != map_screen) return;
+  if (g_nav.speed_kmh <= 0) return;         /* standing: nothing drifts */
+  if (g_map_mux == NULL) return;
+  uint32_t now = millis();
+  if (!g_dr_last_ms) { g_dr_last_ms = now; return; }
+  uint32_t dt = now - g_dr_last_ms;
+  g_dr_last_ms = now;
+  if (dt == 0 || dt > 500) return;
+
+  /* snapshot the prepared frame under the mutex (short copy of the
+     header fields is not enough — the lines embed their points, so we
+     paint INSIDE the mutex; the comm task only holds it for its own
+     prepare, and our paint is ~40 ms — acceptable contention) */
+  xSemaphoreTake(g_map_mux, portMAX_DELAY);
+  /* px/s = speed/3.6 m/s * scale/100 px/m */
+  g_dr_px_s = (int32_t)(((int64_t)g_nav.speed_kmh * g_map_out.scale) / 360);
+  g_dr_dy += (int32_t)(((int64_t)g_dr_px_s * dt) / 1000);
+  if (g_dr_dy > 120 || g_dr_dy < -30) g_dr_dy = 0;   /* stale/crazy → snap */
+  dr_repaint(&g_map_out, g_dr_dy);
+  xSemaphoreGive(g_map_mux);
+}
+
+
+static void render_map_display(const MapRenderFrame *rf) {
+  /* full-frame path: paint the geometry into the PSRAM framebuffer with
+     our own fat-line renderer (map_blit), then invalidate the ONE image
+     object — LVGL redraws the map region from the buffer, no line
+     rasterization, no per-object invalidation. */
+  static uint16_t *panel_fb = nullptr;
+  if (panel_fb == nullptr) panel_fb = (uint16_t *)gfx->getFramebuffer();
+  if (!panel_fb || !g_map_fb) {
+    Serial.println("[MAP] render skipped: no fb!");
+    return;
+  }
+  /* frame-rate diagnostics: the LVGL perf overlay is meaningless now
+     (LVGL doesn't render the map), so we count OUR frames here and
+     report once per 10 s over serial. */
+  static uint32_t fps_frames = 0;
+  static uint32_t fps_window_ms = 0;
+  static uint32_t fps_last_ms = 0;
+  {
+    uint32_t now = millis();
+    if (fps_last_ms == 0) fps_last_ms = now;
+    fps_frames++;
+    fps_window_ms = now - fps_last_ms;
+    if (fps_window_ms >= 10000) {
+      Serial.printf("[FPS] map: %u.%u fps (frame time %u ms avg)\n",
+                    (unsigned)(fps_frames * 10000 / fps_window_ms),
+                    (unsigned)((fps_frames * 100000 / fps_window_ms) % 10),
+                    (unsigned)(fps_window_ms / fps_frames));
+      fps_frames = 0;
+      fps_last_ms = now;
+    }
+  }
+
+  /* dead reckoning: a REAL frame is exact — drop the accumulated
+     drift ENTIRELY (the tick kept a stale offset after real frames
+     and fought them: the map jumped up/down repeatedly until the
+     snap limit fired — user-visible as bouncing jumps) */
+  g_dr_have = true;
+  g_dr_last_ms = 0;
+  g_dr_dy = 0;
+
+  /* 1. paint OFFSCREEN into the PSRAM fb — the panel never shows the
+        intermediate black/cleared state (that was the flicker). */
+  map_blit_init(g_map_fb);
+  map_blit_frame(rf);
+  /* 2. band + speed-limit sign painted INTO the frame — as part of
+        the frame they cannot flicker (the old LVGL objects raced the
+        map memcpy every frame and showed as pixel streaks). */
+  map_blit_band();
+  map_blit_limit_sign(g_nav.limit_kmh > 0);
+  /* 3. vehicle + destination markers painted INTO the map (alpha
+        blended) — LVGL objects would leave black boxes over the map. */
+  if (rf->show_vehicle)
+    map_blit_vehicle(vehicle_icon_map, MAP_CX, MAP_CY, 64);
+  if (rf->marker_visible)
+    map_blit_marker(rf->marker_x, rf->marker_y);
+
+  /* 3b. texts painted INTO the frame too (the last LVGL labels raced
+        the panel scan and flickered as pixel streaks):
+        - maneuver icon (48x48, alpha) + distance in the band
+        - limit number inside the painted sign
+        - heading/scale caption top */
+  if (g_nav.limit_kmh > 0) {
+    char s[8];
+    snprintf(s, sizeof s, "%d", g_nav.limit_kmh);
+    const lv_font_t *f = (g_nav.limit_kmh >= 100) ? &lv_font_montserrat_24
+                           : &lv_font_montserrat_34;
+    /* centred in the painted sign at (360,120) */
+    const int w = (int)strlen(s) * (f->line_height / 2);
+    map_blit_text_lv((void *)f, s, 360 - w / 2, 120 - f->line_height / 2, 0x0000);
+  }
+  {
+    /* distance + maneuver icon: centred as a GROUP in the band (the
+       user's original layout: icon left of the text, pair centred) */
+    char d[16];
+    if (g_nav.dist_m >= 1000) {
+      /* one decimal, e.g. 1050 → "1.0 km" */
+      snprintf(d, sizeof d, "%d.%d km", g_nav.dist_m / 1000,
+               (g_nav.dist_m % 1000) / 100);
+    } else if (g_nav.dist_m > 0) {
+      snprintf(d, sizeof d, "%d m", g_nav.dist_m);
+    } else {
+      snprintf(d, sizeof d, "--");
+    }
+    const int band_y = SCREEN_H - 84;   /* band top */
+    const lv_font_t *f = &lv_font_montserrat_34;
+    const int icon_w = 48, gap = 16;
+    const int text_w = (int)(strlen(d) * (f->line_height / 2));
+    const int group_w = icon_w + gap + text_w;
+    const int gx0 = (SCREEN_W - group_w) / 2;
+    map_blit_vehicle(maneuver_icon_map(g_nav.maneuver[0] ? g_nav.maneuver : "straight"),
+                     gx0 + icon_w / 2, band_y + 42, 48);
+    map_blit_text_lv((void *)f, d, gx0 + icon_w + gap,
+                     band_y + 42 - f->line_height / 2, 0xFFFF);
+  }
+  /* scale caption: REMOVED per user request — the zoom level is
+     obvious from the roads, nobody needs metres numbers while riding. */
+  /* 3. ONE block copy into the panel framebuffer the hardware scans.
+        ~450 KB memcpy ≈ 15-25 ms — atomic enough visually (no black
+        flash; worst case one torn frame line). */
+  memcpy(panel_fb, g_map_fb, (size_t)SCREEN_W * SCREEN_H * 2);
+  /* 4. NOTHING left for LVGL on the map screen: band, sign, markers,
+        maneuver icon, distance, limit number and the caption are all
+        painted into the frame. No LVGL region ever races the panel
+        scan — the flicker is gone by construction. */
+  /* DIRECT mode: do NOT invalidate anything here — the map pixels are
+     already in the fb. Invalidating the screen would make LVGL refill
+     the region with the screen bg (erasing the map). Overlays
+     invalidate themselves when their content changes (labels, band,
+     sign) — LVGL redraws only those small regions. The map area
+     between/around the overlays is never touched by LVGL. */
 
   /* ---- destination dot marker (screen coords, pre-rotated) -------- */
   if (map_marker) {
@@ -777,27 +978,18 @@ static void render_map_display(const MapRenderFrame *rf) {
     }
   }
 
-  /* ---- vehicle marker (fixed at screen centre; world pre-rotated) -- */
-  if (map_vehicle) {
-    if (!rf->show_vehicle) lv_obj_add_flag(map_vehicle, LV_OBJ_FLAG_HIDDEN);
-    else                   lv_obj_remove_flag(map_vehicle, LV_OBJ_FLAG_HIDDEN);
-  }
+  /* vehicle + destination markers are painted INTO the map by
+     map_blit (alpha-blended, no black boxes); the LVGL objects stay
+     hidden on the map screen. */
+  if (map_vehicle) lv_obj_add_flag(map_vehicle, LV_OBJ_FLAG_HIDDEN);
+  if (map_marker) lv_obj_add_flag(map_marker, LV_OBJ_FLAG_HIDDEN);
 
-  /* ---- scale bar + caption ---------------------------------------- */
-  if (map_scale) {
-    if (rf->show_scale) lv_obj_remove_flag(map_scale, LV_OBJ_FLAG_HIDDEN);
-    else                lv_obj_add_flag(map_scale, LV_OBJ_FLAG_HIDDEN);
-  }
-  if (map_label) {
-    char txt[64];
-    int heading_deg = rf->heading / 10;
-    if (rf->show_scale)
-      snprintf(txt, sizeof txt, "%d°   |   %d m", heading_deg, rf->scale_meters);
-    else
-      snprintf(txt, sizeof txt, "%d°   |   %u Seg.", heading_deg, (unsigned)rf->seg_count);
-    lv_label_set_text(map_label, txt);
-    lv_obj_remove_flag(map_label, LV_OBJ_FLAG_HIDDEN);
-  }
+  /* ---- scale bar + caption: painted into the frame by map_blit_text_lv
+     (see above). The LVGL objects stay hidden FOREVER — un-hiding them
+     here made them race the panel scan (the flickering box at the top
+     edge was this label being re-shown every frame). */
+  if (map_scale) lv_obj_add_flag(map_scale, LV_OBJ_FLAG_HIDDEN);
+  if (map_label) lv_obj_add_flag(map_label, LV_OBJ_FLAG_HIDDEN);
 }
 
 /* Display thread: if a new prepared frame is published AND the map
@@ -1146,7 +1338,11 @@ static void handle_map_test(const char *line) {
 
 static void goto_screen(lv_obj_t *scr, const char *name) {
   active_screen = scr;
-  lv_scr_load_anim(scr, LV_SCR_LOAD_ANIM_FADE_IN, 200, 0, false);
+  /* hard switch, NO fade: in DIRECT mode with a single buffer the fade
+     needs a full-screen snapshot of the outgoing screen; when that
+     fails the whole map area turns white. A hard cut is instant and
+     safe (screen switches are rare: nav start/stop, taps). */
+  lv_scr_load(scr);
   Serial.printf("[UI] -> %s\n", name);
 }
 
@@ -1361,16 +1557,56 @@ void setup() {
   lv_init();
   lv_tick_set_cb(millis);
 
-  size_t buffer_size = sizeof(uint16_t) * screen_width * 48;
-  buf1 = (uint8_t *)heap_caps_malloc(buffer_size, MALLOC_CAP_SPIRAM);
-  buf2 = (uint8_t *)heap_caps_malloc(buffer_size, MALLOC_CAP_SPIRAM);
-  if (!buf1 || !buf2) {
-    /* fall back to internal RAM (480*48*2 = 46KB each \u2014 fits) */
-    if (!buf1) buf1 = (uint8_t *)malloc(buffer_size);
-    if (!buf2) buf2 = (uint8_t *)malloc(buffer_size);
-    Serial.printf("[WARN] SPIRAM alloc failed, using internal RAM: buf1=%p buf2=%p\n", buf1, buf2);
+  /* Allocate the 480×480 RGB565 map framebuffer EARLY (setup order):
+     in DIRECT mode it doubles as the LVGL display framebuffer, and
+     create_map_screen only wires the map_blit renderer to it. */
+  size_t spiram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+  Serial.printf("[MEM] SPIRAM free: %u KB\n", (unsigned)(spiram_free / 1024));
+  if (spiram_free == 0) {
+    Serial.println("[MEM] NO SPIRAM! Board option must be 'PSRAM: OPI PSRAM'");
   }
-  if (!buf1 || !buf2) {
+  g_map_fb = (uint16_t *)heap_caps_malloc(
+      sizeof(uint16_t) * SCREEN_W * SCREEN_H, MALLOC_CAP_SPIRAM);
+  if (g_map_fb && map_blit_init(g_map_fb)) {
+    for (size_t i = 0; i < (size_t)SCREEN_W * SCREEN_H; i++) g_map_fb[i] = 0;
+    Serial.printf("[MEM] map fb: PSRAM %u KB\n",
+                  (unsigned)(SCREEN_W * SCREEN_H * 2 / 1024));
+  } else {
+    g_map_fb = NULL;
+    Serial.printf("[MEM] map fb alloc FAILED (wanted %u KB, SPIRAM free %u KB)\n",
+                  (unsigned)(SCREEN_W * SCREEN_H * 2 / 1024),
+                  (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
+  }
+
+  /* LVGL render buffer: ONE buffer in INTERNAL RAM. Pixel access from
+     SPIRAM is several times slower and the render loop is the FPS
+     bottleneck (measured 1-2 FPS with PSRAM buffers). ONE 46 KB buffer
+     (not two): the BLE/NimBLE stack needs a large share of internal
+     RAM — two buffers starved it and the device bootlooped with
+     'hci inits failed'. Single-buffer = LVGL waits for the flush to
+     finish before rendering the next chunk (no tearing protection,
+     irrelevant for our use). PSRAM stays as fallback. */
+  /* DIRECT mode: the 480×480 PSRAM map framebuffer (allocated in
+     create_map_screen, before lv_display_create runs) IS the display
+     framebuffer. LVGL draws the overlays straight into it and the
+     flush sends dirty regions to the panel — the map image is never
+     copied through the draw pipeline again (that copy was ~95 ms).
+     The map_blit renderer paints the map directly into the same
+     buffer; after painting we invalidate the map area.
+     Fallback: if the PSRAM fb is missing, PARTIAL mode with a 48-row
+     internal buffer (slow old path). */
+  if (g_map_fb) {
+    buf1 = (uint8_t *)g_map_fb;
+    buf2 = nullptr;
+    Serial.println("[MEM] DIRECT mode: PSRAM map fb = display fb");
+  } else {
+    size_t buffer_size = sizeof(uint16_t) * screen_width * 48;
+    buf1 = (uint8_t *)heap_caps_malloc(buffer_size, MALLOC_CAP_INTERNAL);
+    if (!buf1) buf1 = (uint8_t *)heap_caps_malloc(buffer_size, MALLOC_CAP_SPIRAM);
+    buf2 = nullptr;
+    Serial.println("[MEM] fallback: PARTIAL mode");
+  }
+  if (!buf1) {
     Serial.println("[FATAL] LVGL framebuffer allocation failed");
     while (true) delay(1000);
   }
@@ -1378,7 +1614,15 @@ void setup() {
   lv_display_t *display = lv_display_create(screen_width, screen_height);
   lv_display_set_color_format(display, LV_COLOR_FORMAT_RGB565);
   lv_display_set_flush_cb(display, my_disp_flush);
-  lv_display_set_buffers(display, buf1, buf2, buffer_size, LV_DISPLAY_RENDER_MODE_PARTIAL);
+  if (g_map_fb) {
+    lv_display_set_buffers(display, buf1, buf2,
+                           (uint32_t)screen_width * screen_height * 2,
+                           LV_DISPLAY_RENDER_MODE_DIRECT);
+  } else {
+    lv_display_set_buffers(display, buf1, buf2,
+                           sizeof(uint16_t) * screen_width * 48,
+                           LV_DISPLAY_RENDER_MODE_PARTIAL);
+  }
 
   lv_indev_t *touch_indev = lv_indev_create();
   lv_indev_set_type(touch_indev, LV_INDEV_TYPE_POINTER);
@@ -1389,21 +1633,37 @@ void setup() {
    * (screen creation, BLE GATT init) — otherwise the splash never
    * shows: rendering normally starts only in loop(). One manual
    * lv_timer_handler() here flushes the splash to the panel now. */
+  /* Splash WITHOUT LVGL: in DIRECT mode the lv_timer_handler() here
+     hung the boot (full-screen render through the draw pipeline into
+     the 450 KB PSRAM buffer — never returned; boot stuck on the logo).
+     Paint the splash straight into the PANEL framebuffer instead:
+     fill black + blit the I8 logo (palette + indices) — a few ms. */
   {
-    lv_obj_t *def = lv_scr_act();
-    g_splash_screen = lv_obj_create(NULL);
-    lv_obj_remove_style_all(g_splash_screen);
-    lv_obj_set_size(g_splash_screen, SCREEN_W, SCREEN_H);
-    lv_obj_set_style_bg_color(g_splash_screen, C_BG, 0);
-    lv_obj_set_style_bg_opa(g_splash_screen, LV_OPA_COVER, 0);
-    lv_obj_t *img = lv_img_create(g_splash_screen);
-    lv_img_set_src(img, &libremoto_logo);   /* the wordmark, not the icon */
-    lv_img_set_antialias(img, true);
-    lv_obj_align(img, LV_ALIGN_CENTER, 0, 0);
-    lv_scr_load(g_splash_screen);     /* force — no anim */
-    lv_obj_delete(def);               /* drop the default blank screen */
-    active_screen = g_splash_screen;  /* gestures see a valid screen  */
-    lv_timer_handler();               /* PAINT now, before BLE init    */
+    uint16_t *panel_fb0 = (uint16_t *)gfx->getFramebuffer();
+    if (panel_fb0) {
+      for (size_t i = 0; i < (size_t)SCREEN_W * SCREEN_H; i++) panel_fb0[i] = 0x0000;
+      /* logo: 480x188 I8 — palette (256 ARGB8888, B,G,R,A) + indices */
+      const uint8_t *pal = libremoto_logo_map;
+      const uint8_t *idx = libremoto_logo_map + 256 * 4;
+      const int lw = 480, lh = 188;
+      const int x0 = (SCREEN_W - lw) / 2, y0 = (SCREEN_H - lh) / 2;
+      for (int y = 0; y < lh; y++) {
+        uint16_t *dst = panel_fb0 + (size_t)(y0 + y) * SCREEN_W + x0;
+        const uint8_t *row = idx + (size_t)y * lw;
+        for (int x = 0; x < lw; x++) {
+          const uint8_t *e = pal + row[x] * 4;   /* B,G,R,A */
+          const uint8_t b = e[0], g = e[1], r = e[2], a = e[3];
+          if (a < 16) { dst[x] = 0x0000; continue; }   /* transparent */
+          /* panel byte order: R/B swapped */
+          dst[x] = (uint16_t)(((uint32_t)b >> 3) << 11 |
+                              ((uint32_t)g >> 2) << 5 |
+                              ((uint32_t)r >> 3));
+        }
+      }
+      Serial.println("[UI] splash painted to panel fb");
+    }
+    /* no LVGL screen switch yet — home comes after the splash timeout
+       via goto_screen(); active_screen stays NULL-safe */
     g_splash_until_ms = millis() + 2000;
   }
 
@@ -1432,8 +1692,8 @@ void setup() {
     ble_cb.on_nav      = on_ble_nav;
     ble_cb.on_map_frame = on_ble_map_frame;
     ble_cb.on_ctrl     = on_ble_ctrl;
-    ble_link_init(&ble_cb);
-    ble_ready = true;
+      ble_link_init(&ble_cb);
+      ble_ready = true;
     Serial.println("[BLE] GATT server up: NavData/Status/MapData/Control");
     Serial.printf("[BLE] adv=%s name=%s\n", "on", BLE_NAME);
   }
@@ -1443,6 +1703,7 @@ void setup() {
   Serial.println("[TASK] comm task started (BLE + parse + geometry)");
 
   ble_timer = lv_timer_create(ble_blink_cb, 500, NULL);
+  lv_timer_create(dr_tick_cb, DR_TICK_MS, NULL);   /* dead-reckoning repaints */
 
   /* NO goto_screen(home_screen) here — the splash owns the display
    * until g_splash_until_ms expires (handle_state_timeouts switches to
@@ -1453,6 +1714,11 @@ void setup() {
   Serial.println("Serial cmds: h n m | b<0-100> | {\"v\":1,\"t\":...} (protocol.md §2)");
 }
 
+/* render timing diagnostics: where do the ~160 ms full redraws go?
+ *  - t_blit  = render_map_display (setting 44 lines' points)
+ *  - t_lvgl  = lv_timer_handler (render into buffer + flush to panel)
+ *  - t_flush = my_disp_flush sum (panel transfer only)
+ * printed once per second; maxima over that second. */
 void loop() {
   /* DISPLAY task: everything LVGL lives here. The comm task
      (BLE + parse + geometry) publishes into g_map_out / ui_q. */

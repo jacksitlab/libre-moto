@@ -32,9 +32,10 @@ object MapProjector {
     //             so corners clip — fine, the firmware just won't draw
     //             off-screen pixels)
     // The i16 point space (±32767) has plenty of headroom for this.
-    const val AHEAD_PX = 320
+    const val AHEAD_PX = 480   /* round display: the circle reaches 480 px
+                                   ahead of the vehicle — the world must too */
     const val BEHIND_PX = 160
-    const val SIDE_PX = 320
+    const val SIDE_PX = 480
 
     /** Equirectangular meters-offset from ref, at the ref latitude. */
     fun toMetersDelta(ref: LatLon, p: LatLon): Pair<Double, Double> {
