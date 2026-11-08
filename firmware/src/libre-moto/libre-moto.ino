@@ -80,8 +80,9 @@ static lv_obj_t *map_vehicle_outer = NULL;  /* ... white rim (under it)   */
 static lv_obj_t *map_marker = NULL;    /* destination marker (rotating frame) */
 static lv_obj_t *map_scale = NULL;     /* scale bar line */
 static lv_obj_t *map_label = NULL;     /* heading / scale label */
-static lv_obj_t *map_nav_arrow = NULL; /* maneuver arrow (info bar, top) */
-static lv_obj_t *map_nav_dist = NULL;  /* "350 m" (info bar) */
+static lv_obj_t *map_nav_panel = NULL; /* bottom info panel (Beeline style) */
+static lv_obj_t *map_nav_arrow = NULL; /* maneuver arrow, inside the panel */
+static lv_obj_t *map_nav_dist  = NULL;  /* "350 m", inside the panel */
 static lv_obj_t *map_limit = NULL;     /* speed limit sign circle */
 static lv_obj_t *map_limit_label = NULL; /* ... the number inside */
 
@@ -386,23 +387,37 @@ static void create_map_screen(void) {
   lv_obj_align(map_label, LV_ALIGN_CENTER, 0, -215);
   lv_obj_remove_flag(map_label, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
 
-  /* ---- nav info bar (top): maneuver arrow + distance + speed limit.
-     Replaces the removed nav screen — the map is THE navigation view. */
-  map_nav_arrow = lv_line_create(map_screen);
+  /* ---- nav info panel (bottom, Beeline style): maneuver arrow +
+     distance on a semi-transparent dark panel below the vehicle marker,
+     visually separated from the map. The map is THE navigation view. */
+  map_nav_panel = lv_obj_create(map_screen);
+  lv_obj_remove_style_all(map_nav_panel);
+  /* full-width band, flush to the bottom edge (user request: from the
+     far left to the far right, all the way down) */
+  lv_obj_set_size(map_nav_panel, 480, 84);
+  lv_obj_align(map_nav_panel, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+  lv_obj_set_style_radius(map_nav_panel, 0, 0);
+  lv_obj_set_style_bg_color(map_nav_panel, lv_color_black(), 0);
+  lv_obj_set_style_bg_opa(map_nav_panel, LV_OPA_60, 0);   /* semi-transparent */
+  lv_obj_set_style_border_width(map_nav_panel, 0, 0);
+  lv_obj_remove_flag(map_nav_panel, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
+
+  map_nav_arrow = lv_line_create(map_nav_panel);
   lv_obj_set_size(map_nav_arrow, 48, 48);
-  lv_obj_align(map_nav_arrow, LV_ALIGN_TOP_LEFT, 16, 12);
+  lv_obj_align(map_nav_arrow, LV_ALIGN_CENTER, -70, 0);
   lv_obj_set_style_line_width(map_nav_arrow, 7, 0);
   lv_obj_set_style_line_color(map_nav_arrow, C_TEXT, 0);
   lv_obj_set_style_line_rounded(map_nav_arrow, true, 0);
   lv_obj_remove_flag(map_nav_arrow, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
   set_arrow_pts(map_nav_arrow, "straight");
 
-  map_nav_dist = lv_label_create(map_screen);
-  lv_label_set_text(map_nav_dist, "—");
+  map_nav_dist = lv_label_create(map_nav_panel);
+  lv_label_set_text(map_nav_dist, "\u2014");
   lv_obj_set_style_text_font(map_nav_dist, &lv_font_montserrat_34, 0);
   lv_obj_set_style_text_color(map_nav_dist, C_TEXT, 0);
-  lv_obj_align(map_nav_dist, LV_ALIGN_TOP_LEFT, 76, 14);
+  lv_obj_align(map_nav_dist, LV_ALIGN_CENTER, 20, 0);
   lv_obj_remove_flag(map_nav_dist, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
+
 
   /* speed limit sign: white circle, red ring, number inside */
   map_limit = lv_obj_create(map_screen);
@@ -413,7 +428,12 @@ static void create_map_screen(void) {
   lv_obj_set_style_bg_opa(map_limit, LV_OPA_COVER, 0);
   lv_obj_set_style_border_width(map_limit, 7, 0);
   lv_obj_set_style_border_color(map_limit, C_BAD, 0);      /* red ring */
-  lv_obj_align(map_limit, LV_ALIGN_TOP_RIGHT, -16, 10);
+  /* ROUND display: the visible area is a circle (r=240 around 240/240).
+     A TOP_RIGHT corner align would place the sign in the INVISIBLE
+     corner region outside the circle — it rendered fine but could
+     never be seen. Fixed coords: box centre (360,120) is fully inside
+     the visible circle (verified geometrically). */
+  lv_obj_set_pos(map_limit, 360 - 32, 120 - 32);
   lv_obj_remove_flag(map_limit, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
   lv_obj_add_flag(map_limit, LV_OBJ_FLAG_HIDDEN);          /* shown when limit > 0 */
 
@@ -421,7 +441,6 @@ static void create_map_screen(void) {
   lv_label_set_text(map_limit_label, "50");
   lv_obj_set_style_text_font(map_limit_label, &lv_font_montserrat_34, 0);
   lv_obj_set_style_text_color(map_limit_label, C_BG, 0);   /* black on white */
-  lv_obj_align(map_limit_label, LV_ALIGN_TOP_RIGHT, -16, 10);
   lv_obj_add_flag(map_limit_label, LV_OBJ_FLAG_IGNORE_LAYOUT);
   lv_obj_align_to(map_limit_label, map_limit, LV_ALIGN_CENTER, 0, 0);
   lv_obj_remove_flag(map_limit_label, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
@@ -457,19 +476,25 @@ static void toast(const char *text, lv_color_t color);
 static void toast_debug(const char *text, lv_color_t color, uint32_t ms);
 
 /* Render the current NavState on the MAP INFO BAR (top): maneuver
- * arrow + distance + speed-limit sign. The old nav screen is gone —
- * the map is THE navigation view. */
+ * arrow + speed-limit sign. The old nav screen is gone — the map is
+ * THE navigation view. (The distance number was removed on user
+ * request — 'a number I can't make sense of'.) */
 static void render_nav_from_state(void) {
   if (map_nav_arrow)
     set_arrow_pts(map_nav_arrow, g_nav.maneuver[0] ? g_nav.maneuver : "straight");
 
   if (map_nav_dist) {
     char d[16];
-    if (g_nav.dist_m > 0) snprintf(d, sizeof d, "%d m", g_nav.dist_m);
-    else                  strcpy(d, "\u2014");
+    if (g_nav.dist_m > 0) {
+      if (g_nav.dist_m >= 1000)
+        snprintf(d, sizeof d, "%d.%d km", g_nav.dist_m / 1000, (g_nav.dist_m % 1000) / 100);
+      else
+        snprintf(d, sizeof d, "%d m", g_nav.dist_m);
+    } else {
+      strcpy(d, "\u2014");
+    }
     lv_label_set_text(map_nav_dist, d);
   }
-
   /* speed limit sign (top right): shown only when the app provides one */
   bool showLimit = g_nav.limit_kmh > 0;
   if (map_limit) {
@@ -479,6 +504,13 @@ static void render_nav_from_state(void) {
       char s[8];
       snprintf(s, sizeof s, "%d", g_nav.limit_kmh);
       lv_label_set_text(map_limit_label, s);
+      /* fit the number inside the 64 px circle: 3 digits need a
+       * smaller font than 2 (e.g. 130 km/h on the motorway) */
+      const lv_font_t *f = (g_nav.limit_kmh >= 100) ? &lv_font_montserrat_24
+                             : (g_nav.limit_kmh >= 10)  ? &lv_font_montserrat_34
+                             : &lv_font_montserrat_40;
+      lv_obj_set_style_text_font(map_limit_label, f, 0);
+      lv_obj_align_to(map_limit_label, map_limit, LV_ALIGN_CENTER, 0, 0);
     } else {
       lv_obj_add_flag(map_limit, LV_OBJ_FLAG_HIDDEN);
       lv_obj_add_flag(map_limit_label, LV_OBJ_FLAG_HIDDEN);
@@ -644,8 +676,9 @@ static void on_ble_nav(const void *data, size_t len) {
   rx_count++;
   NavState st;
   if (parse_nav_message(buf, len, &st)) {
-    Serial.printf("[RX] BLE frame #%u OK  t=%d %u B\n",
-                  (unsigned)rx_count, (unsigned)st.msg_type, (unsigned)len);
+    Serial.printf("[RX] BLE frame #%u OK  t=%d %u B  limit=%d dist=%d %s\n",
+                  (unsigned)rx_count, (unsigned)st.msg_type, (unsigned)len,
+                  st.limit_kmh, st.dist_m, st.maneuver);
     struct ui_msg m;
     m.kind = UI_MSG_NAV;
     m.nav  = st;
