@@ -275,14 +275,19 @@ class MapManager(
         val out = HashMap<String, LmmMap>()
         for (f in mapsDir.listFiles { f -> f.name.endsWith(".lmm") } ?: emptyArray()) {
             try {
-                out[f.name.removeSuffix(".lmm")] = LmmMap.load(f.inputStream())
+                val m = LmmMap.load(f.inputStream())
+                out[f.name.removeSuffix(".lmm")] = m
+                // version Visibility: v2 maps carry maxspeed data — the
+                // speed-limit sign on the display stays empty without them.
+                log("maps: ${f.name} = ${m.roadCount} Straßen, " +
+                    "Format ${if (m.hasMaxspeed) "v2 (mit Tempolimit)" else "v1 (ohne!)"}, " +
+                    "${m.roadsWithLimit} Straßen mit Limit")
             } catch (e: Exception) {
                 log("maps: Ladefehler ${f.name}: ${e.message}")
             }
         }
         maps = out
-        log("maps: ${out.size} Regionen geladen " +
-            "(${out.entries.joinToString { "${it.key}=${it.value.roadCount}" }})")
+        log("maps: ${out.size} Regionen geladen")
     }
 
     fun loadedRegions(): Map<String, LmmMap> = maps

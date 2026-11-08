@@ -45,8 +45,13 @@ class LmmRoad(val highway: String, val latE7: IntArray, val lonE7: IntArray,
 class LmmMap private constructor(
     private val tiles: HashMap<Long, IntRange>,   // tileId → road indices
     private val roads: List<LmmRoad>,
+    private val formatV2: Boolean = false,
 ) {
     val roadCount: Int get() = roads.size
+    /** true = v2 (.lmm with maxspeed data), false = v1 (no limits). */
+    val hasMaxspeed: Boolean get() = formatV2
+    /** How many roads carry a speed limit (0 on v1 maps). */
+    val roadsWithLimit: Int get() = roads.count { it.maxspeedKmh > 0 }
 
     /** All roads whose polyline intersects the bbox (lat/lon in degrees).
      *  Tile lookup first (coarse), then an exact bbox-vs-road-bbox filter —
@@ -174,7 +179,7 @@ class LmmMap private constructor(
             }
             if (roads.size != roadCount) throw IllegalArgumentException(
                 "roadCount ${roads.size} != header $roadCount")
-            return LmmMap(tiles, roads)
+            return LmmMap(tiles, roads, v2)
         }
 
         private fun readU32(b: ByteArray, o: Int): Int =
