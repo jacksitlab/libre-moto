@@ -13,6 +13,8 @@
 #include "../map/map_render.h" /* prepare_map_frame(): geometry stage (comm thread)   */
 #include "libremoto_icon.h"    /* the LibreMoto mark (generated from docs/icon.svg)    */
 #include "libremoto_logo.h"    /* the wordmark (generated from docs/logo.svg)         */
+#include "maneuver_icons.h"   /* maneuver arrows (generated from docs/assets/maneuvers) */
+#include "vehicle_icon.h"     /* vehicle marker (generated from docs/assets/vehicle.svg) */
 
 /* LVGL 9 image descriptor for the icon (ARGB8888, 200×200). */
 static const lv_image_dsc_t libremoto_icon = {
@@ -43,6 +45,57 @@ static const lv_image_dsc_t libremoto_logo = {
   .data_size = 480 * 188 * 4,
   .data = libremoto_logo_map,
 };
+
+/* Maneuver arrow icons (48×48 ARGB8888, generated from
+ * docs/assets/maneuvers/*.svg — replace the SVGs and re-run
+ * scripts/svg2maneuvers.py to restyle them). */
+#define MANEUVER_ICON_DSC(name) \
+  static const lv_image_dsc_t maneuver_icon_##name = { \
+    .header = { \
+      .magic = LV_IMAGE_HEADER_MAGIC, \
+      .cf = LV_COLOR_FORMAT_ARGB8888, \
+      .flags = 0, \
+      .w = 48, .h = 48, \
+      .stride = 48 * 4, \
+      .reserved_2 = 0, \
+    }, \
+    .data_size = 48 * 48 * 4, \
+    .data = maneuver_##name##_map, \
+  };
+MANEUVER_ICON_DSC(left)
+MANEUVER_ICON_DSC(right)
+MANEUVER_ICON_DSC(straight)
+MANEUVER_ICON_DSC(uturn)
+MANEUVER_ICON_DSC(merge)
+MANEUVER_ICON_DSC(slight_left)
+MANEUVER_ICON_DSC(slight_right)
+
+/* Vehicle marker icon (64×64 ARGB8888, generated from
+ * docs/assets/vehicle.svg — replace the SVG and re-run the script). */
+static const lv_image_dsc_t vehicle_icon = {
+  .header = {
+    .magic = LV_IMAGE_HEADER_MAGIC,
+    .cf = LV_COLOR_FORMAT_ARGB8888,
+    .flags = 0,
+    .w = 64,
+    .h = 64,
+    .stride = 64 * 4,
+    .reserved_2 = 0,
+  },
+  .data_size = 64 * 64 * 4,
+  .data = vehicle_icon_map,
+};
+
+/** Wire keyword → icon descriptor (NULL = unknown → straight). */
+static const lv_image_dsc_t *maneuver_icon(const char *dir) {
+  if      (!strcmp(dir, "left"))        return &maneuver_icon_left;
+  else if (!strcmp(dir, "right"))       return &maneuver_icon_right;
+  else if (!strcmp(dir, "uturn"))       return &maneuver_icon_uturn;
+  else if (!strcmp(dir, "merge"))       return &maneuver_icon_merge;
+  else if (!strcmp(dir, "slight_left")) return &maneuver_icon_slight_left;
+  else if (!strcmp(dir, "slight_right")) return &maneuver_icon_slight_right;
+  else                                   return &maneuver_icon_straight;
+}
 
 /*---------------------------------------------------------------
  * Hardware (CrowPanel 2.1" — see docs/hardware.md)
@@ -75,8 +128,7 @@ static lv_obj_t *map_screen = NULL;
    ESP32 line budget for the two-pass casing+fill render. */
 #define MAP_POOL      44
 static lv_obj_t *map_lines[MAP_POOL];
-static lv_obj_t *map_vehicle = NULL;        /* Beeline diamond, black core */
-static lv_obj_t *map_vehicle_outer = NULL;  /* ... white rim (under it)   */
+static lv_obj_t *map_vehicle = NULL;        /* vehicle marker icon (SVG) */
 static lv_obj_t *map_marker = NULL;    /* destination marker (rotating frame) */
 static lv_obj_t *map_scale = NULL;     /* scale bar line */
 static lv_obj_t *map_label = NULL;     /* heading / scale label */
@@ -284,24 +336,6 @@ static void create_home_screen(void) {
   lv_obj_align(ble_dot, LV_ALIGN_CENTER, 0, 80);
 }
 
-/* Maneuver arrow points (shared shapes, 120×120 box; the caller sets
- * the object size so the same shapes scale for big/small arrows). */
-static const lv_point_precise_t AR_L[4] = {{112,60}, {12,60}, {12,25}, {12,95}};
-static const lv_point_precise_t AR_R[4] = {{8,60}, {108,60}, {108,25}, {108,95}};
-static const lv_point_precise_t AR_S[3] = {{10,112}, {60,8}, {110,112}};
-static const lv_point_precise_t AR_U[4] = {{112,105}, {112,35}, {8,35}, {8,105}};
-
-/** Set the maneuver arrow on ANY lv_line (shapes in a 120×120 box). */
-static void set_arrow_pts(lv_obj_t *line, const char *dir) {
-  static lv_point_precise_t pts[8];
-  const lv_point_precise_t *A; int n;
-  if      (!strcmp(dir, "left"))  { A = AR_L; n = 4; }
-  else if (!strcmp(dir, "right")) { A = AR_R; n = 4; }
-  else if (!strcmp(dir, "uturn")) { A = AR_U; n = 4; }
-  else                            { A = AR_S; n = 3; }
-  for (int i = 0; i < n; i++) pts[i] = A[i];
-  lv_line_set_points(line, pts, (uint32_t)n);
-}
 
 static void create_map_screen(void) {
   map_screen = new_screen();
@@ -324,34 +358,14 @@ static void create_map_screen(void) {
        + marker created after the pool are drawn on top. */
   }
 
-  /* ---- vehicle marker: Beeline-style diamond — white border, black core.
-     Two squares rotated 45° (LVGL transform), the smaller on top:
-     white 30 px under black 20 px = a diamond with a white rim.
-     Points at the vehicle position (MAP_CX/MAP_CY = 240/320). */
-  map_vehicle_outer = lv_obj_create(map_screen);
-  lv_obj_remove_style_all(map_vehicle_outer);
-  lv_obj_set_size(map_vehicle_outer, 30, 30);
-  lv_obj_set_style_radius(map_vehicle_outer, 4, 0);
-  lv_obj_set_style_bg_color(map_vehicle_outer, C_TEXT, 0);   /* white rim */
-  lv_obj_set_style_bg_opa(map_vehicle_outer, LV_OPA_COVER, 0);
-  lv_obj_set_style_border_width(map_vehicle_outer, 0, 0);
-  lv_obj_set_style_transform_rotation(map_vehicle_outer, 450, 0);
-  lv_obj_set_style_transform_pivot_x(map_vehicle_outer, 15, 0);
-  lv_obj_set_style_transform_pivot_y(map_vehicle_outer, 15, 0);
-  lv_obj_set_pos(map_vehicle_outer, 240 - 15, 320 - 15);
-  lv_obj_remove_flag(map_vehicle_outer, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
-
-  map_vehicle = lv_obj_create(map_screen);
-  lv_obj_remove_style_all(map_vehicle);
-  lv_obj_set_size(map_vehicle, 20, 20);
-  lv_obj_set_style_radius(map_vehicle, 3, 0);
-  lv_obj_set_style_bg_color(map_vehicle, C_BG, 0);          /* black core */
-  lv_obj_set_style_bg_opa(map_vehicle, LV_OPA_COVER, 0);
-  lv_obj_set_style_border_width(map_vehicle, 0, 0);
-  lv_obj_set_style_transform_rotation(map_vehicle, 450, 0);
-  lv_obj_set_style_transform_pivot_x(map_vehicle, 10, 0);
-  lv_obj_set_style_transform_pivot_y(map_vehicle, 10, 0);
-  lv_obj_set_pos(map_vehicle, 240 - 10, 320 - 10);
+  /* ---- vehicle marker: SVG-rendered icon (docs/assets/vehicle.svg),
+     centred on the vehicle position (MAP_CX/MAP_CY = 240/320). The
+     icon's tip points UP — the firmware rotates the world, not the
+     marker. */
+  map_vehicle = lv_img_create(map_screen);
+  lv_img_set_src(map_vehicle, &vehicle_icon);
+  lv_img_set_antialias(map_vehicle, true);
+  lv_obj_set_pos(map_vehicle, 240 - 32, 320 - 32);
   lv_obj_remove_flag(map_vehicle, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
 
   /* ---- destination dot marker (rotating frame only) ----------------- */
@@ -402,20 +416,19 @@ static void create_map_screen(void) {
   lv_obj_set_style_border_width(map_nav_panel, 0, 0);
   lv_obj_remove_flag(map_nav_panel, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
 
-  map_nav_arrow = lv_line_create(map_nav_panel);
-  lv_obj_set_size(map_nav_arrow, 48, 48);
-  lv_obj_align(map_nav_arrow, LV_ALIGN_CENTER, -70, 0);
-  lv_obj_set_style_line_width(map_nav_arrow, 7, 0);
-  lv_obj_set_style_line_color(map_nav_arrow, C_TEXT, 0);
-  lv_obj_set_style_line_rounded(map_nav_arrow, true, 0);
+  map_nav_arrow = lv_img_create(map_nav_panel);
+  lv_img_set_src(map_nav_arrow, &maneuver_icon_straight);
+  lv_img_set_antialias(map_nav_arrow, true);
+  lv_obj_align(map_nav_arrow, LV_ALIGN_CENTER, -95, 0);
   lv_obj_remove_flag(map_nav_arrow, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
-  set_arrow_pts(map_nav_arrow, "straight");
 
   map_nav_dist = lv_label_create(map_nav_panel);
   lv_label_set_text(map_nav_dist, "\u2014");
   lv_obj_set_style_text_font(map_nav_dist, &lv_font_montserrat_34, 0);
   lv_obj_set_style_text_color(map_nav_dist, C_TEXT, 0);
-  lv_obj_align(map_nav_dist, LV_ALIGN_CENTER, 20, 0);
+  /* distance right NEXT to the arrow (align_to keeps the gap constant
+     regardless of the label width: '50 m' vs '1.2 km') */
+  lv_obj_align_to(map_nav_dist, map_nav_arrow, LV_ALIGN_OUT_RIGHT_MID, 16, 0);
   lv_obj_remove_flag(map_nav_dist, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_CHAIN));
 
 
@@ -481,7 +494,8 @@ static void toast_debug(const char *text, lv_color_t color, uint32_t ms);
  * request — 'a number I can't make sense of'.) */
 static void render_nav_from_state(void) {
   if (map_nav_arrow)
-    set_arrow_pts(map_nav_arrow, g_nav.maneuver[0] ? g_nav.maneuver : "straight");
+    lv_img_set_src(map_nav_arrow,
+      maneuver_icon(g_nav.maneuver[0] ? g_nav.maneuver : "straight"));
 
   if (map_nav_dist) {
     char d[16];
@@ -494,6 +508,9 @@ static void render_nav_from_state(void) {
       strcpy(d, "\u2014");
     }
     lv_label_set_text(map_nav_dist, d);
+    /* re-anchor after the text change: a wider/narrower label must stay
+     glued to the RIGHT of the arrow (align_to, not a fixed offset) */
+    lv_obj_align_to(map_nav_dist, map_nav_arrow, LV_ALIGN_OUT_RIGHT_MID, 16, 0);
   }
   /* speed limit sign (top right): shown only when the app provides one */
   bool showLimit = g_nav.limit_kmh > 0;
@@ -764,10 +781,6 @@ static void render_map_display(const MapRenderFrame *rf) {
   if (map_vehicle) {
     if (!rf->show_vehicle) lv_obj_add_flag(map_vehicle, LV_OBJ_FLAG_HIDDEN);
     else                   lv_obj_remove_flag(map_vehicle, LV_OBJ_FLAG_HIDDEN);
-  }
-  if (map_vehicle_outer) {
-    if (!rf->show_vehicle) lv_obj_add_flag(map_vehicle_outer, LV_OBJ_FLAG_HIDDEN);
-    else                   lv_obj_remove_flag(map_vehicle_outer, LV_OBJ_FLAG_HIDDEN);
   }
 
   /* ---- scale bar + caption ---------------------------------------- */
