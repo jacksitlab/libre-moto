@@ -50,10 +50,9 @@ class FlickerStabilityTest {
             // clipping — only corridor-relevant streets are candidates.
             val minLat = vehicle.latitude - wLat; val maxLat = vehicle.latitude + wLat
             val minLon = vehicle.longitude - wLon; val maxLon = vehicle.longitude + wLon
-            val corridorM = 2880.0 / scale100
             val candKeys = HashSet<Long>()
             for (s in streets) {
-                if (!MapProjector.streetRelevantToRoute(s.points, route, corridorM, vehicle.latitude)) continue
+                if (!MapProjector.streetTouchesRoute(s.points, route, vehicle.latitude)) continue
                 for (seg in MapProjector.clipPolylineToBbox(s.points, minLat, minLon, maxLat, maxLon)) {
                     if (seg.size >= 2) { candKeys.add(key(s.points.first())); break }
                 }

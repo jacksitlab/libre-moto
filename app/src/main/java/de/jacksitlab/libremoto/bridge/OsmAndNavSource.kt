@@ -108,15 +108,17 @@ class OsmAndNavSource(
     @Volatile private var zoomTracking = true
 
     /** Target scale from the smoothed speed (px/m × 100).
-     *  Reference: AHEAD_PX (320) — the display area in front of the vehicle
-     *  (look-ahead layout). The SAME metre specs (500 m city … 1000 m
-     *  country) now fill 320 px instead of 240 → everything renders 33 %
-     *  larger → much better readability at unchanged lookahead metres. */
+     *  Reference: AHEAD_PX (480) — the round display's visible circle
+     *  reaches 480 px ahead of the vehicle, so 'lookahead' metres must
+     *  fill 480 px. (The old 320 reference was stale after the window
+     *  widened: scale 24 claimed 1000 m but actually showed 2000 m —
+     *  nobody needs that.) Metre specs stay: 500 m city … 1000 m
+     *  country road. */
     private fun targetScale(): Int {
         val t = ((smoothedSpeedKmh - zoomLowSpeedKmh) /
                  (zoomHighSpeedKmh - zoomLowSpeedKmh)).coerceIn(0.0, 1.0)
         val lookahead = zoomMinLookaheadM + t * (zoomMaxLookaheadM - zoomMinLookaheadM)
-        return (320.0 / lookahead * 100.0).toInt()
+        return (MapProjector.AHEAD_PX / lookahead * 100.0).toInt()
     }
 
     /** DISCRETE zoom levels: quantize the continuous target to steps of 8
@@ -126,13 +128,25 @@ class OsmAndNavSource(
      *  (96 changes in 7 min in lm-4.log), and every scale step dropped and
      *  re-added the streets at the window edge (visible flicker). With
      *  quantized levels the window only changes on REAL speed changes. */
-    private var quantTargetScale = 24   // start: 1000 m Voraussicht
+    private var quantTargetScale = 24   // start: long Voraussicht
+    private var lastZoomChangeMs = 0L
+
+    /** Min dwell time per zoom level: the level must HOLD this long
+     *  before another change is allowed. Kills the in/out ping-pong
+     *  when speed hovers around a step boundary (user: the zoom
+     *  going in and out constantly is annoying). */
+    private val zoomDwellMs = 6_000L
 
     private fun updateQuantTarget(contTarget: Int): Int {
-        val step = 8
-        val margin = step / 2 + 2   // 6: switch level only clearly beyond half a step
-        if (contTarget > quantTargetScale + margin) quantTargetScale += step
-        else if (contTarget < quantTargetScale - margin) quantTargetScale -= step
+        val step = 16
+        val margin = step / 2 + 4   // 12: switch only clearly beyond half a step
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastZoomChangeMs < zoomDwellMs) return quantTargetScale
+        if (contTarget > quantTargetScale + margin) {
+            quantTargetScale += step; lastZoomChangeMs = now
+        } else if (contTarget < quantTargetScale - margin) {
+            quantTargetScale -= step; lastZoomChangeMs = now
+        }
         return quantTargetScale
     }
 
@@ -274,7 +288,8 @@ class OsmAndNavSource(
                 }
                 val kmh = (distM / dtS) * 3.6
                 if (kmh <= 250.0) {
-                    val alpha = 0.3   // EMA: ~3 ticks until a new speed registers
+                    val alpha = 0.2   // EMA: ~5 ticks until a new speed registers
+                                     // (slow on purpose — it only DRIVES the zoom)
                     smoothedSpeedKmh = smoothedSpeedKmh * (1 - alpha) + kmh * alpha
                 }
             }

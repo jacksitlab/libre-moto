@@ -138,13 +138,14 @@ object FrameBuilder {
         val minLon = ref.longitude - sideM / mPerDegLon
         val maxLon = ref.longitude + sideM / mPerDegLon
 
-        // ---- route segment: CLIPPED to the window, then projected ----
-        // projectPolyline clamps out-of-window points onto the window edge
-        // (a deliberate guard for the wire format), so feeding it the WHOLE
-        // route folded everything beyond the horizon onto the top edge —
-        // the route appeared bent along the top border. Clip first: the
-        // route now ENDS at the window edge instead of folding.
-        val routeClipped = MapProjector.clipPolylineToBbox(route, minLat, minLon, maxLat, maxLon)
+        // ---- route segment: CLIPPED to the HEADING-ROTATED window ----
+        // The old bbox clip cut against a NORTH-ALIGNED box while the
+        // display is heading-rotated — driving south, the route left the
+        // box after BEHIND_M and ended mid-screen. The rotated window
+        // follows the view: ahead along the heading, ±side across.
+        val headingDeg = headingDeg10 / 10.0
+        val routeClipped = MapProjector.clipPolylineToWindow(
+            route, ref, headingDeg, aheadM, behindM, sideM)
         val routeVisible = routeClipped.maxByOrNull { it.size } ?: emptyList()
         if (routeVisible.size < 2) {
             // ref itself is outside its own window (should not happen) — fall
@@ -166,7 +167,8 @@ object FrameBuilder {
         // corridor filter treats it like the route — streets alongside the
         // road we just rode stay visible.
         if (trail.size >= 2) {
-            val trailVisible = MapProjector.clipPolylineToBbox(trail, minLat, minLon, maxLat, maxLon)
+            val trailVisible = MapProjector.clipPolylineToWindow(
+                trail, ref, headingDeg, aheadM, behindM, sideM)
                 .maxByOrNull { it.size } ?: emptyList()
             if (trailVisible.size >= 2) {
                 val tPts = MapProjector.projectPolyline(ref, trailVisible, scale100)
@@ -187,18 +189,35 @@ object FrameBuilder {
         //    visual corridor width stays ~12 px regardless of zoom.
         //    The corridor follows route + TRAIL (the road behind us), so
         //    streets alongside the road we just rode stay visible too.
-        val corridorM = 2880.0 / scale100   // 60 m at 48, 120 m at 24
-        val corridorPath = if (trail.size >= 2) route + trail else route
+        // Route-contact filter (Beeline, tightened): only streets that
+        // CROSS route+trail or MOUTH onto it (endpoint ≤ 15 m). The old
+        // distance corridor kept non-crossing parallels — on the round
+        // display they read as random streets floating in the landscape.
+        // Crossing streets are additionally LENGTH-LIMITED around their
+        // contact point (300 m ≈ the visible circle) so they don't run
+        // to the horizon.
+        val contactPath = if (trail.size >= 2) route + trail else route
+        val maxContactLenM = 300.0
         val corridorStreets = ArrayList<StreetRoad>(streets.size)
         var culled = 0
         for (s in streets) {
             if (s.points.size < 2) continue
-            if (MapProjector.streetRelevantToRoute(s.points, corridorPath, corridorM, ref.latitude)) {
-                corridorStreets.add(s)
-            } else culled++
+            when (MapProjector.streetRouteContact(s.points, contactPath, ref.latitude)) {
+                MapProjector.CONTACT_ALONG ->
+                    // the road we DRIVE on: full length, no cut — the A115
+                    // case (800 m of roads=0 on the motorway)
+                    corridorStreets.add(s)
+                MapProjector.CONTACT_CROSS -> {
+                    val cut = MapProjector.cutToContactLength(s.points, contactPath,
+                                                              maxContactLenM, ref.latitude)
+                    if (cut.size >= 2)
+                        corridorStreets.add(StreetRoad(s.roadType, cut))
+                }
+                else -> culled++
+            }
         }
         if (log != null && culled > 0 && corridorStreets.size + culled > 8) {
-            log("corridor: ${corridorStreets.size} relevant, $culled culled (${corridorM.toInt()} m)")
+            log("contact: ${corridorStreets.size} relevant, $culled culled")
         }
         val candidates = corridorStreets
 
@@ -217,7 +236,7 @@ object FrameBuilder {
         for (street in candidates) {
             if (street.points.size < 2) continue
             val anchor = streetKey(street.points.first())
-            for (seg in MapProjector.clipPolylineToBbox(street.points, minLat, minLon, maxLat, maxLon)) {
+            for (seg in MapProjector.clipPolylineToWindow(street.points, ref, headingDeg, aheadM, behindM, sideM)) {
                 if (seg.size >= 2) clipped.add(Clipped(street.roadType, seg, MapProjector.roadRank(street.roadType), anchor))
             }
         }
@@ -378,9 +397,13 @@ object FrameBuilder {
         prevFrameStreetKeys = sentAnchors
         log?.invoke("frame: route + ${totalSegs - 1} roads " +
             "(${segments.sumOf { it.points.size }} pts, ${budgetBytes}B Budget restlich)")
+        // FLAG_SCALE_BAR dropped: the user removed the scale bar from the
+        // display ("nobody needs metre numbers while riding") — the flag
+        // made the PREVIEW renderer draw a two-bar scale at (20..120,455)
+        // that read as a stray street piece bottom-left on EVERY image.
         return MapFrame(
             seq = seq,
-            flags = MapFrame.FLAG_ROTATE or MapFrame.FLAG_VEHICLE or MapFrame.FLAG_SCALE_BAR,
+            flags = MapFrame.FLAG_ROTATE or MapFrame.FLAG_VEHICLE,
             headingDeg10 = headingDeg10,
             scalePxPerMeter100 = scale100,
             segments = segments,

@@ -47,18 +47,111 @@ object MapProjector {
 
     /** Project one polyline to vehicle-relative pixels.
      *  scale100 = px per meter × 100 (MapFrame.scalePxPerMeter100).
-     *  x = east, y = -north (route goes "up" = negative y). Clamped to the
-     *  asymmetric window: ahead -AHEAD_PX, behind +BEHIND_PX, ±SIDE_PX. */
+     *  x = east, y = -north (route goes "up" = negative y).
+     *
+     *  NO window clamp: the old clamp folded everything outside the
+     *  NORTH-aligned window onto its border — with the heading-rotated
+     *  clip window this CORRUPTED geometry (a point 100 m ahead while
+     *  driving SE got y=+BEHIND_PX: the route bent double, user saw a
+     *  90° curve rendered at ~150°). Visible geometry is decided by
+     *  clipPolylineToWindow; this projection is faithful. A wide
+     *  ±3000 px guard only protects the i16 wire range; the firmware's
+     *  brush clips off-screen pixels itself (mb_brush). */
     fun projectPolyline(ref: LatLon, pts: List<LatLon>, scale100: Int): List<Point> {
         val pxPerMeter = scale100 / 100.0
         val out = ArrayList<Point>(pts.size)
+        val GUARD = 3000
         for (p in pts) {
             val (dEastM, dNorthM) = toMetersDelta(ref, p)
-            val px = (dEastM * pxPerMeter).toInt().coerceIn(-SIDE_PX, SIDE_PX)
-            val py = (-dNorthM * pxPerMeter).toInt().coerceIn(-AHEAD_PX, BEHIND_PX)
+            val px = (dEastM * pxPerMeter).toInt().coerceIn(-GUARD, GUARD)
+            val py = (-dNorthM * pxPerMeter).toInt().coerceIn(-GUARD, GUARD)
             out.add(Point(px, py))
         }
         return out
+    }
+
+    /** Clip a polyline against the HEADING-ROTATED visible window.
+     *  The old bbox clip cut against a NORTH-ALIGNED box while the display
+     *  is heading-rotated — driving south, the route left the box after
+     *  BEHIND_M and the frame showed it ending mid-screen (user: "the
+     *  street at the top is missing; it should bend 90° left up there").
+     *  This clip works in vehicle-relative metres: the window is the
+     *  rectangle [-ahead, +behind] along the driving axis, ±side across,
+     *  rotated by `headingDeg`. Segments are returned in lat/lon. */
+    fun clipPolylineToWindow(pts: List<LatLon>, ref: LatLon, headingDeg: Double,
+                             aheadM: Double, behindM: Double, sideM: Double): List<List<LatLon>> {
+        if (pts.size < 2) return emptyList()
+        val mPerDegLon = METERS_PER_DEG_LAT * cos(Math.toRadians(ref.latitude))
+        val h = Math.toRadians(headingDeg)
+        val sh = kotlin.math.sin(h); val ch = kotlin.math.cos(h)
+        // vehicle-relative metres (east, north) → window coords.
+        // Rotation semantics MUST match the firmware's screen rotation
+        // (map_render_impl.h): a point at bearing `heading` (the driving
+        // direction) maps to FORWARD = screen up. The first version here
+        // swapped the axes (forward ≈ lateral), so driving SE the route
+        // landed BEHIND the window and was cut at behindM — the frame
+        // showed it ending mid-screen. Correct:
+        //   forward  = dN*cos(h) + dE*sin(h)
+        //   lateral  = dE*cos(h) - dN*sin(h)   (+ = right of heading)
+        fun toWin(p: LatLon): DoubleArray {
+            val dE = (p.longitude - ref.longitude) * mPerDegLon
+            val dN = (p.latitude - ref.latitude) * METERS_PER_DEG_LAT
+            return doubleArrayOf(dN * ch + dE * sh,   // forward (+ = ahead)
+                                 dE * ch - dN * sh)   // lateral (+ = right)
+        }
+        fun toLatLon(w: DoubleArray): LatLon {
+            val dN = w[0] * ch - w[1] * sh
+            val dE = w[1] * ch + w[0] * sh
+            return LatLon(ref.latitude + dN / METERS_PER_DEG_LAT,
+                          ref.longitude + dE / mPerDegLon)
+        }
+        val out = ArrayList<List<LatLon>>()
+        var cur = ArrayList<LatLon>()
+        var prevIn = false
+        var prevW: DoubleArray? = null
+        for (p in pts) {
+            val w = toWin(p)
+            val inside = w[0] >= -behindM && w[0] <= aheadM && kotlin.math.abs(w[1]) <= sideM
+            if (inside) {
+                if (!prevIn && prevW != null) {
+                    // entered: interpolate the crossing point on the window border
+                    val cross = borderCross(prevW!!, w, aheadM, behindM, sideM)
+                    cur = ArrayList(); cur.add(toLatLon(cross)); cur.add(p)
+                } else if (prevIn) {
+                    cur.add(p)
+                } else {
+                    cur = ArrayList(); cur.add(p)
+                }
+            } else if (prevIn && prevW != null) {
+                // left the window: interpolate the exit point
+                val cross = borderCross(prevW!!, w, aheadM, behindM, sideM)
+                cur.add(toLatLon(cross))
+                if (cur.size >= 2) out.add(cur)
+                cur = ArrayList()
+            }
+            prevIn = inside; prevW = w
+        }
+        if (cur.size >= 2) out.add(cur)
+        return out
+    }
+
+    /** Where does the segment w0→w1 cross the window border? Simple
+     *  parametric walk: find t where the path leaves the rectangle. */
+    private fun borderCross(w0: DoubleArray, w1: DoubleArray,
+                            aheadM: Double, behindM: Double, sideM: Double): DoubleArray {
+        var lo = 0.0; var hi = 1.0
+        fun insideAt(t: Double): Boolean {
+            val f = w0[0] + (w1[0] - w0[0]) * t
+            val l = w0[1] + (w1[1] - w0[1]) * t
+            return f >= -behindM && f <= aheadM && kotlin.math.abs(l) <= sideM
+        }
+        if (insideAt(hi)) return w1.copyOf()
+        for (i in 0 until 24) {
+            val mid = (lo + hi) / 2
+            if (insideAt(mid)) lo = mid else hi = mid
+        }
+        return doubleArrayOf(w0[0] + (w1[0] - w0[0]) * hi,
+                             w0[1] + (w1[1] - w0[1]) * hi)
     }
 
     /** Clip a polyline to a lat/lon bbox. Returns the segments INSIDE the
@@ -151,20 +244,41 @@ object MapProjector {
         return out
     }
 
-    /** Corridor filter (Beeline-style): is this street relevant to the route?
-     *  RELEVANT = (a) any segment CROSSES the route (intersection/mouth —
-     *  always shown IN FULL, however far it reaches), or (b) the street runs
-     *  within `corridorM` of the route (parallel companion — kept, but the
-     *  corridor is narrow so non-crossing parallels further out are culled).
-     *  Distance in metres, equirectangular around `refLat`. */
-    fun streetRelevantToRoute(pts: List<LatLon>, route: List<LatLon>,
-                              corridorM: Double, refLat: Double): Boolean {
-        if (pts.size < 2 || route.size < 2) return false
+    /** Route-contact classification (Beeline-style, per user feedback):
+     *  0 = no contact (culled)
+     *  1 = CROSSES the route/trail, or an endpoint LIES ON it (T-junction
+     *      mouth) — shown BOUNDED (cutToContactLength)
+     *  2 = the route RUNS ALONG the street (the road we drive on!) —
+     *      shown IN FULL within the window.
+     *  Type 2 was missing and bit on the motorway: the A115 is one long
+     *  way with no junctions — it neither crosses the route nor ends on
+     *  it, so the filter dropped the very road the user was driving on
+     *  (roads=0 for 800 m on the A115). In the city this never showed:
+     *  OSM splits streets into short ways at every junction, so the
+     *  own road entered via the endpoint test. */
+    const val CONTACT_NONE = 0
+    const val CONTACT_CROSS = 1
+    const val CONTACT_ALONG = 2
+
+    fun streetRouteContact(pts: List<LatLon>, route: List<LatLon>,
+                           refLat: Double): Int {
+        if (pts.size < 2 || route.size < 2) return CONTACT_NONE
         val mLat = METERS_PER_DEG_LAT
         val mLon = METERS_PER_DEG_LAT * kotlin.math.cos(Math.toRadians(refLat))
 
-        // (a) crossing test: any street segment × any route segment
-        //     (bbox-rejected first for speed)
+        // (c) route runs ALONG the street: ≥ 20 % of the street's points
+        //     within 15 m of the route (own carriageway; a crossing only
+        //     puts 1-2 points that close)
+        var near = 0
+        for (p in pts) {
+            for (j in 0 until route.size - 1) {
+                val d = pointSegmentDistM(p, route[j], route[j + 1], mLat, mLon)
+                if (d <= 15.0) { near++; break }
+            }
+        }
+        if (near * 5 >= pts.size) return CONTACT_ALONG
+
+        // (a) any street segment crosses any route segment (bbox-reject)
         for (i in 0 until pts.size - 1) {
             val a1 = pts[i]; val a2 = pts[i + 1]
             val aMinLat = minOf(a1.latitude, a2.latitude); val aMaxLat = maxOf(a1.latitude, a2.latitude)
@@ -174,19 +288,65 @@ object MapProjector {
                 if (b2.latitude < aMinLat || b1.latitude > aMaxLat) continue
                 if (maxOf(b1.longitude, b2.longitude) < aMinLon ||
                     minOf(b1.longitude, b2.longitude) > aMaxLon) continue
-                if (segmentsCross(a1, a2, b1, b2)) return true
+                if (segmentsCross(a1, a2, b1, b2)) return CONTACT_CROSS
             }
         }
-        // (b) corridor: min distance of any street point to the route ≤ corridorM
-        for (p in pts) {
-            var best = Double.MAX_VALUE
+        // (b) T-junction: a street ENDPOINT on the route (≤ 15 m)
+        for (p in listOf(pts.first(), pts.last())) {
             for (j in 0 until route.size - 1) {
-                val d = pointSegmentDistM(p, route[j], route[j + 1], mLat, mLon)
-                if (d < best) best = d
-                if (best <= corridorM) return true
+                val d = pointSegmentDistM(p, route[j], route[j + 1],
+                                          METERS_PER_DEG_LAT, mLon)
+                if (d <= 15.0) return CONTACT_CROSS
             }
         }
-        return false
+        return CONTACT_NONE
+    }
+
+    /** Backwards-compatible boolean view of streetRouteContact. */
+    fun streetTouchesRoute(pts: List<LatLon>, route: List<LatLon>,
+                           refLat: Double): Boolean =
+        streetRouteContact(pts, route, refLat) != CONTACT_NONE
+
+    /** Bound a crossing street's drawn length: keep at most `maxLenM`
+     *  of polyline around its CLOSEST contact point with the route —
+     *  crossing streets no longer run to the horizon. */
+    fun cutToContactLength(pts: List<LatLon>, route: List<LatLon>,
+                           maxLenM: Double, refLat: Double): List<LatLon> {
+        if (pts.size < 2 || route.size < 2) return pts
+        val mLat = METERS_PER_DEG_LAT
+        val mLon = METERS_PER_DEG_LAT * kotlin.math.cos(Math.toRadians(refLat))
+        // find the street point closest to the route = the contact
+        var bestIdx = 0; var bestD = Double.MAX_VALUE
+        for (i in pts.indices) {
+            for (j in 0 until route.size - 1) {
+                val d = pointSegmentDistM(pts[i], route[j], route[j + 1], mLat, mLon)
+                if (d < bestD) { bestD = d; bestIdx = i }
+            }
+        }
+        // walk outward from the contact until maxLenM is used up
+        var budget = maxLenM
+        var lo = bestIdx
+        while (lo > 0) {
+            val d = haversineM(pts[lo - 1], pts[lo])
+            if (d > budget) break
+            budget -= d; lo--
+        }
+        var hi = bestIdx
+        while (hi < pts.size - 1) {
+            val d = haversineM(pts[hi], pts[hi + 1])
+            if (d > budget) break
+            budget -= d; hi++
+        }
+        return pts.subList(lo, hi + 1)
+    }
+
+    /** Point-to-point distance in metres (equirectangular, refLat). */
+    private fun haversineM(a: LatLon, b: LatLon): Double {
+        val mLat = METERS_PER_DEG_LAT
+        val mLon = METERS_PER_DEG_LAT * kotlin.math.cos(Math.toRadians(a.latitude))
+        val dLat = (b.latitude - a.latitude) * mLat
+        val dLon = (b.longitude - a.longitude) * mLon
+        return kotlin.math.sqrt(dLat * dLat + dLon * dLon)
     }
 
     /** 2D segment intersection test (lat/lon as plane coords — fine at

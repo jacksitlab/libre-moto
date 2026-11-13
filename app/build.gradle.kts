@@ -52,6 +52,21 @@ tasks.withType<Test>().configureEach {
     //   -DtourStops="52.51933,13.34229" -DtourScale=48
     systemProperty("tourStops", System.getProperty("tourStops", ""))
     systemProperty("tourScale", System.getProperty("tourScale", "48"))
+
+    // GPX replay + GeoJSON export (map verification side tools):
+    //   -DrunGpx=true -DgpxFile=… -DgpxMap=… [-DgpxStep=50]
+    //   -DrunExport=true -DexportMap=… [-DexportPbf=…]
+    systemProperty("runGpx", System.getProperty("runGpx", "false"))
+    systemProperty("gpxFile", System.getProperty("gpxFile", ""))
+    systemProperty("gpxMap", System.getProperty("gpxMap", ""))
+    systemProperty("gpxStep", System.getProperty("gpxStep", "50"))
+    systemProperty("runExport", System.getProperty("runExport", "false"))
+    systemProperty("exportMap", System.getProperty("exportMap", ""))
+    systemProperty("exportPbf", System.getProperty("exportPbf", ""))
+    // .lmm builder helper:
+    //   -DbuildPbf=… -DbuildOut=…
+    systemProperty("buildPbf", System.getProperty("buildPbf", ""))
+    systemProperty("buildOut", System.getProperty("buildOut", ""))
 }
 
 dependencies {

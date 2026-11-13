@@ -136,9 +136,11 @@ class MapProjectorTest {
         // 100 m east → x = +24 px
         val east = MapProjector.projectPolyline(vehicle, listOf(at(0.0, 100.0)), 24)
         assertEquals(24, east[0].x)
-        // clamping: 10 km north at scale 48 → 4800 px → clamped to -AHEAD_PX
+        // no window clamp anymore (the heading-rotated clip window owns
+        // visibility): 10 km north at scale 48 → 4800 px → guarded to
+        // -3000 only for the i16 wire range; faithful projection
         val far = MapProjector.projectPolyline(vehicle, listOf(at(10_000.0, 0.0)), 48)
-        assertEquals(-480, far[0].y)
+        assertEquals(-3000, far[0].y)
         // rotation 0° north: point north of vehicle maps to vehicle pos - y
         val rot = MapProjector.rotateForDisplay(listOf(Point(0, -100)), 0.0)
         assertEquals(240, rot[0].x); assertEquals(220, rot[0].y)   // 320-100
