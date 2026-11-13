@@ -510,10 +510,62 @@ class OsmAndNavSource(
      *  Updated with the nearby-roads pull from the .lmm map. */
     @Volatile private var currentLimitKmh = 0
 
-    /** maxspeed of the road nearest to the vehicle (equirectangular
-     *  point-to-polyline distance; roads farther than 40 m are ignored —
-     *  on a motorway the parallel opposite carriageway is ~20-30 m away,
-     *  and the correct side is nearer). Returns 0 if nothing qualifies. */
+    /** maxspeed of the road the ROUTE runs on (user report #1: OsmAnd
+     *  showed 50, the display stayed 30 — the geometrically nearest road
+     *  is regularly a side street at junctions). Selection mirrors the
+     *  map's own ALONG logic: a road qualifies when the route runs on
+     *  it; among qualifiers the nearest wins. Roads farther than 40 m
+     *  are ignored (on a motorway the opposite carriageway is 20-30 m
+     *  away and the correct side is nearer). Returns 0 if nothing
+     *  qualifies. */
+    private fun routeRoadMaxspeed(roads: List<LmmRoad>, lat: Double, lon: Double): Int {
+        val route = routePoints.map { LatLon(it.latitude, it.longitude) }
+        if (route.size < 2) return nearestRoadMaxspeed(roads, lat, lon)
+        var best = Double.MAX_VALUE
+        var bestSpeed = 0
+        val refLat = MapProjector.METERS_PER_DEG_LAT
+        val refMPerLon = refLat * Math.cos(Math.toRadians(lat))
+        val vx = lon * refMPerLon
+        val vy = lat * refLat
+        val mLat = refLat
+        val mLon = refMPerLon
+        for (r in roads) {
+            // does the route run ALONG this road? (same test as the map
+            // filter: >= 4 consecutive points near the route)
+            var run = 0; var bestRun = 0
+            for (i in 0 until r.npts) {
+                val px = r.latE7[i] / 1e7
+                val py = r.lonE7[i] / 1e7
+                var near = false
+                for (j in 0 until route.size - 1) {
+                    val d = MapProjector.pointSegmentDistM(LatLon(px, py), route[j], route[j + 1], mLat, mLon)
+                    if (d <= 15.0) { near = true; break }
+                }
+                if (near) { run++; if (run > bestRun) bestRun = run } else run = 0
+            }
+            if (bestRun < 4) continue   // not our road — can't own the limit
+            // distance of the VEHICLE to this road (nearest segment)
+            var dBest = Double.MAX_VALUE
+            for (i in 0 until r.npts - 1) {
+                val ax = r.lonE7[i] / 1e7 * refMPerLon
+                val ay = r.latE7[i] / 1e7 * refLat
+                val bx = r.lonE7[i + 1] / 1e7 * refMPerLon
+                val by = r.latE7[i + 1] / 1e7 * refLat
+                val dx = bx - ax; val dy = by - ay
+                val len2 = dx * dx + dy * dy
+                val t = if (len2 == 0.0) 0.0
+                        else (((vx - ax) * dx + (vy - ay) * dy) / len2).coerceIn(0.0, 1.0)
+                val px2 = ax + t * dx; val py2 = ay + t * dy
+                val d2 = (vx - px2) * (vx - px2) + (vy - py2) * (vy - py2)
+                if (d2 < dBest) dBest = d2
+            }
+            if (dBest < best) { best = dBest; bestSpeed = r.maxspeedKmh }
+        }
+        return if (best <= 40.0 * 40.0) bestSpeed else 0
+    }
+
+    /** maxspeed of the road nearest to the vehicle (fallback without a
+     *  route, e.g. before the first route update). */
     private fun nearestRoadMaxspeed(roads: List<LmmRoad>, lat: Double, lon: Double): Int {
         var best = Double.MAX_VALUE
         var bestSpeed = 0
@@ -569,7 +621,7 @@ class OsmAndNavSource(
         } else null
 
         if (lmmRoads != null && lmmRoads.isNotEmpty()) {
-            val newLimit = nearestRoadMaxspeed(lmmRoads, centerLat, centerLon)
+            val newLimit = routeRoadMaxspeed(lmmRoads, centerLat, centerLon)
             if (newLimit != currentLimitKmh) {
                 log("limit: ${if (newLimit > 0) "$newLimit km/h" else "none"} " +
                     "(road under the vehicle, ${lmmRoads.size} candidates)")

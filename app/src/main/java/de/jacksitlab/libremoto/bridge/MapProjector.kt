@@ -266,17 +266,27 @@ object MapProjector {
         val mLat = METERS_PER_DEG_LAT
         val mLon = METERS_PER_DEG_LAT * kotlin.math.cos(Math.toRadians(refLat))
 
-        // (c) route runs ALONG the street: ≥ 20 % of the street's points
-        //     within 15 m of the route (own carriageway; a crossing only
-        //     puts 1-2 points that close)
-        var near = 0
+        // (c) route runs ALONG the street = the road we DRIVE on.
+        //     Two sufficient proofs, either one wins:
+        //     1. ≥ 4 CONSECUTIVE street points within 15 m of the route —
+        //        a crossing puts only 1-2 points that close; 4 in a row is
+        //        driving on it. Robust for LONG ways: a motorway way spans
+        //        kilometres, the route covers 1.2 km of it — a percentage
+        //        of the WHOLE way fails (A115 at 52.4425,13.2030: 18.6 %
+        //        < 20 % threshold → the own road was culled AGAIN).
+        //     2. ≥ 20 % of the street's points near the route (short city
+        //        ways where the route covers most of the street).
+        var run = 0; var bestRun = 0; var near = 0
         for (p in pts) {
+            var isNear = false
             for (j in 0 until route.size - 1) {
                 val d = pointSegmentDistM(p, route[j], route[j + 1], mLat, mLon)
-                if (d <= 15.0) { near++; break }
+                if (d <= 15.0) { isNear = true; break }
             }
+            if (isNear) { near++; run++; if (run > bestRun) bestRun = run }
+            else run = 0
         }
-        if (near * 5 >= pts.size) return CONTACT_ALONG
+        if (bestRun >= 4 || near * 5 >= pts.size) return CONTACT_ALONG
 
         // (a) any street segment crosses any route segment (bbox-reject)
         for (i in 0 until pts.size - 1) {
@@ -362,7 +372,7 @@ object MapProjector {
     }
 
     /** Distance in metres from point p to segment a-b (equirectangular). */
-    private fun pointSegmentDistM(p: LatLon, a: LatLon, b: LatLon,
+    fun pointSegmentDistM(p: LatLon, a: LatLon, b: LatLon,
                                   mLat: Double, mLon: Double): Double {
         val px = (p.longitude - a.longitude) * mLon
         val py = (p.latitude - a.latitude) * mLat

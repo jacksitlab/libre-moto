@@ -67,6 +67,13 @@ tasks.withType<Test>().configureEach {
     //   -DbuildPbf=… -DbuildOut=…
     systemProperty("buildPbf", System.getProperty("buildPbf", ""))
     systemProperty("buildOut", System.getProperty("buildOut", ""))
+    // pipeline probe:
+    //   -Dprobe=true -DprobeMap=… -DprobeLat=… -DprobeLon=… [-DprobeScale=48]
+    systemProperty("probe", System.getProperty("probe", "false"))
+    systemProperty("probeMap", System.getProperty("probeMap", ""))
+    systemProperty("probeLat", System.getProperty("probeLat", "0"))
+    systemProperty("probeLon", System.getProperty("probeLon", "0"))
+    systemProperty("probeScale", System.getProperty("probeScale", "48"))
 }
 
 dependencies {
