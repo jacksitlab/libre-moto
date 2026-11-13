@@ -279,17 +279,33 @@ static uint16_t s_flush_scratch[SCREEN_W];
 void my_disp_flush(lv_display_t *display, const lv_area_t *area, uint8_t *px_map) {
   const uint32_t w = (area->x2 - area->x1 + 1);
   const uint32_t h = (area->y2 - area->y1 + 1);
-  /* This ST7701 wiring needs the R/B 5-bit fields swapped. */
+  /* DIRECT-MODE STRIDE (the invisible-dot bug): LVGL hands us the
+     FULL-SCREEN draw buffer — the flushed area is a WINDOW inside it,
+     so the row stride is the SCREEN width (verified in lv_refr.c:
+     call_flush_cb passes layer->draw_buf->data unchanged). The old
+     code indexed rows with the AREA width as stride, reading
+     diagonally through the buffer for every partial flush: the BLE
+     dot's 22x22 region got background pixels painted over it —
+     visible once at screen load (full-area flush, stride matched by
+     accident) then 'erased' by the first blink tick. Same for every
+     other small invalidation (toasts, arrows). */
+  /* px_map IS the full-screen buffer (verified: pointer == our fb) and
+     the flushed area is a WINDOW in it. Absolute indexing:
+     src[(area_y1 + row) * scr_w + area_x1 + col]. The first fix attempt
+     used row*scr_w (area-relative rows, absolute stride) — still wrong;
+     the headless repro caught it: the dot showed the OLD colour after
+     every flush. Repro-verified correct indexing below. */
+  const int32_t scr_w = lv_display_get_horizontal_resolution(display);
   const uint16_t *src = (const uint16_t *)px_map;
-  for (uint32_t y = 0; y < h; ++y) {
-    const uint16_t *srow = src + (size_t)y * w;
+  for (uint32_t row = 0; row < h; ++row) {
+    const uint16_t *srow = src + (size_t)(area->y1 + (int32_t)row) * (uint32_t)scr_w + area->x1;
     uint16_t *drow = s_flush_scratch;
     const uint16_t *dend = drow + w;
     while (drow < dend) {
       const uint16_t c = *srow++;
       *drow++ = (uint16_t)((c & 0x07E0) | ((c & 0x001F) << 11) | ((c & 0xF800) >> 11));
     }
-    gfx->draw16bitRGBBitmap(area->x1, area->y1 + (int16_t)y, s_flush_scratch, w, 1);
+    gfx->draw16bitRGBBitmap(area->x1, area->y1 + (int16_t)row, s_flush_scratch, w, 1);
   }
   lv_display_flush_ready(display);
 }
@@ -1156,6 +1172,7 @@ static void ble_blink_cb(lv_timer_t *t) {
   (void)t;
   static bool on = true;
 
+
   if (!ble_link_connected()) {
     /* NOT connected: blink amber — the old dark grey (0x3B4148) was
        invisible on the black home screen, so the connection status
@@ -1166,8 +1183,13 @@ static void ble_blink_cb(lv_timer_t *t) {
   }
 
   if (app == APP_IDLE) {
+    /* connected but NO data flowing: blink GREEN, both phases clearly
+       visible. The old amber <-> 0x3B4148 blink read as a trembling
+       point, not a blink — the dark grey phase was invisible on the
+       black screen (user: 'the blink just doesn't happen'). */
     on = !on;
-    if (ble_dot) lv_obj_set_style_bg_color(ble_dot, on ? C_WARN : lv_color_hex(0x3B4148), 0);
+    if (ble_dot) lv_obj_set_style_bg_color(ble_dot,
+        on ? C_ACCENT : lv_color_hex(0x0A4A0F), 0);
   } else {
     if (ble_dot) lv_obj_set_style_bg_color(ble_dot, (app == APP_LOST) ? C_BAD : C_ACCENT, 0);
   }
