@@ -1157,7 +1157,11 @@ static void ble_blink_cb(lv_timer_t *t) {
   static bool on = true;
 
   if (!ble_link_connected()) {
-    if (ble_dot)   lv_obj_set_style_bg_color(ble_dot, lv_color_hex(0x3B4148), 0);
+    /* NOT connected: blink amber — the old dark grey (0x3B4148) was
+       invisible on the black home screen, so the connection status
+       showed NOTHING before the first connect (user report #3). */
+    on = !on;
+    if (ble_dot) lv_obj_set_style_bg_color(ble_dot, on ? C_WARN : lv_color_hex(0x7A5A00), 0);
     return;
   }
 
@@ -1724,6 +1728,17 @@ void loop() {
      (BLE + parse + geometry) publishes into g_map_out / ui_q. */
   handle_serial();          /* debug channel (serial stays on display) */
   drain_ui_queue();         /* apply parsed Nav/Ctrl from the comm task */
+  if (g_splash_until_ms) {
+    /* boot splash still owns the panel (painted directly into the panel
+       fb in setup()). LVGL has no screen loaded yet: the first
+       lv_timer_handler() would render the DEFAULT screen (white bg)
+       and flush it over the logo — the 'logo -> white -> icon' boot
+       the user saw. Hold off until the splash expires; the switch in
+       handle_state_timeouts loads home first. */
+    handle_state_timeouts();     /* expires the splash -> loads home */
+    delay(20);
+    return;
+  }
   map_blit_if_new();        /* blit the latest prepared map frame */
   handle_gesture_state();
   handle_state_timeouts();
