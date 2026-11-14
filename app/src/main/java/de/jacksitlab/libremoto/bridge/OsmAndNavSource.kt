@@ -103,6 +103,13 @@ class OsmAndNavSource(
      *  this instead of the raw stale routePoints[0]. */
     @Volatile private var displayPos: ALatLon? = null
     @Volatile private var lastDisplayAtMs = 0L
+    /** The trail/zoom block's own reference (NOT the anchor's): the
+     *  extrapolated display position + tick time. */
+    @Volatile private var lastTrailPos: ALatLon? = null
+    @Volatile private var lastTrailAtMs = 0L
+    /** Display position at the last anchor — the closed-loop reference
+     *  for the extrapolation speed correction. */
+    @Volatile private var lastDisplayAnchorPos: ALatLon? = null
 
     /** Breadcrumb trail behind the vehicle (most recent first): the road we
      *  actually rode. OsmAnd cuts the passed segment from the route, so the
@@ -272,12 +279,37 @@ class OsmAndNavSource(
             headingDeg10 = smoothHeadingDeg10
         }
 
-        // 2b. Speed from vehicle movement (routePoints[0] = position).
-        //     The ANCHOR logic: OsmAnd updates the position ~1 Hz while
-        //     the pump ticks 5 Hz. We remember the last REAL position and
-        //     its timestamp; between real updates every tick extrapolates
-        //     along the route polyline (v*dt), so frames carry a moving
-        //     position instead of frozen-then-jumping.
+        // 2b. VEHICLE POSITION TRACKER (the movement chain, built 2026-11):
+        //     OsmAnd delivers the position in irregular anchors (~1-4 s
+        //     apart in practice, NOT a fixed 1 Hz; bursts after resets).
+        //     The pump sends 5 frames/s. This block turns the anchors into
+        //     a continuously moving displayPos:
+        //
+        //     ANCHOR   a real OsmAnd position (>1 m from the last) seeds
+        //              anchorPos/anchorAtMs and updates the speed EMA
+        //              (burst guard: intervals < 0.5 s don't measure;
+        //              plausibility: < 70 m/s; per-anchor cap +-12 m/s;
+        //              standing: anchors < 2 m apart kill the speed).
+        //     EXPECTED expected(t) = anchor + v*age along the route — the
+        //              position the vehicle SHOULD be at now.
+        //     DISPLAY  displayPos integrates v*dt every pump tick (5 Hz)
+        //              and converges toward EXPECTED at an error-scaled
+        //              rate (1 m/s + 25% of the error/s, capped at half
+        //              the gap) — smooth at any anchor cadence. Hard
+        //              snap + trail reset only > 50 m from EXPECTED
+        //              (real teleports: simulation reset, route recalc).
+        //
+        //     LESSONS (each was a visible artifact on the display):
+        //     - converging to the STALE anchor (not expected) made the
+        //       display lag structurally -> 50 m snap cycles
+        //     - a closed-loop speed trim oscillated (its measurement
+        //       included its own corrections) -> forward/backward jumps
+        //     - two blocks writing the same lastVehiclePos/AtMs clock
+        //       broke the dt measurement -> speed stuck at 0 -> hard
+        //       snaps only
+        //     - the firmware DR must run at exactly the speed the frames
+        //       advance (double drift otherwise); its integer math needs
+        //       milli-px accumulation below ~100 km/h
         if (pts.isNotEmpty()) {
             val pos = pts[0]
             val now = System.currentTimeMillis()
@@ -288,12 +320,65 @@ class OsmAndNavSource(
                 if (last != null && lastAt > 0) {
                     val dtReal = (now - lastAt) / 1000.0
                     val dReal = distanceM(last, pos)
-                    if (dtReal > 0.05 && dReal / dtReal < 70.0) {   // < 250 km/h
-                        // EMA on the speed: OsmAnd delivers anchors in
-                        // ~2 s steps with snapping jitter — a raw d/dt
-                        // jumps frame to frame and the map ping-pongs
+                    if (dReal < 2.0 && dtReal >= 0.5) {
+                        // STANDING DETECTION: the anchors stopped moving
+                        // (simulation pause / red light). Kill the speed
+                        // IMMEDIATELY — the old code kept extrapolating
+                        // at the last speed and the error grew until the
+                        // 50 m snap fired (log: err 46->62->78->94->110 m).
+                        extrapSpeedMs = 0.0
+                    }
+                    if (dtReal >= 0.5 && dReal / dtReal < 70.0) {   // < 250 km/h; >= 0.5 s = burst guard
+                        // CLOSED-LOOP SPEED (the backward-hickup fix):
+                        // the anchor speed is the CHORD (straight-line)
+                        // distance between anchors. In curves the driven
+                        // ARC is longer, and OsmAnd tends to snap anchors
+                        // FORWARD onto the route — so a display position
+                        // that advances at chord speed runs AHEAD of the
+                        // truth and every anchor pulls it BACK (the
+                        // hickups). Instead: measure how far the DISPLAY
+                        // actually advanced since the last anchor and
+                        // compare with the anchor's real movement —
+                        // correct the speed toward agreement, so the
+                        // display neither leads nor lags on average.
+                        // ABSOLUTE SEED (the freeze bug): the closed-loop
+                        // patch accidentally REPLACED the absolute speed
+                        // update — extrapSpeedMs started at 0 and the
+                        // multiplicative correction (0.75+0.25*ratio)
+                        // can never grow it: 0 * anything = 0. The display
+                        // froze between anchors and only the 40% anchor
+                        // pull moved it — '3 quick updates then ~2 s
+                        // nothing' (the anchor interval).
                         val v = dReal / dtReal
-                        extrapSpeedMs = extrapSpeedMs * 0.5 + v * 0.5
+                        val oldV = extrapSpeedMs
+                        // fast EMA (0.3/0.7): the old 0.5/0.5 + the +6 m/s
+                        // spike cap lagged hard acceleration — the [POS]
+                        // log showed the simulation ramping 4.5 -> 28 m/s
+                        // while the capped speed reached only 17.8: the
+                        // expected position stayed ~50 m behind and the
+                        // hard snap fired (the 'err=0.0' anchor). The cap
+                        // was double protection: the BURST GUARD
+                        // (dt >= 0.5 s) already rejects burst intervals,
+                        // and the 70 m/s plausibility catches glitches.
+                        // A +-12 m/s per-anchor cap is generous for real
+                        // riding (43 km/h per anchor) and still smooths
+                        // single outliers.
+                        val ema = oldV * 0.3 + v * 0.7
+                        val lo = maxOf(oldV - 12.0, 0.0)
+                        val hi = oldV + 12.0
+                        extrapSpeedMs = ema.coerceIn(lo, hi).coerceIn(0.0, 70.0)
+                        // CLOSED-LOOP trim on top of the seed: compare the
+                        // display's advance with the anchor's movement and
+                        // correct 25 % toward agreement (display led ->
+                        // slow down; lagged -> speed up).
+                        // (The closed-loop trim that lived here was
+                        // UNSTABLE: its 'display advance' included the
+                        // 40% anchor pull itself — it misread the pull as
+                        // speed, braked, the display lagged, the next pull
+                        // jumped: an oscillation of forward jumps and
+                        // backward corrections. Removed; the rate-limited
+                        // convergence below tracks the anchors without
+                        // jumps, so there is nothing left to trim.)
                     }
                 }
                 anchorPos = pos
@@ -310,19 +395,38 @@ class OsmAndNavSource(
                 //   (the road 'behind us' is elsewhere now). A soft pull
                 //   would crawl for minutes (user: after a simulated
                 //   km-jump it never caught up).
+                // TRACKER (the design fix): converge toward the EXPECTED
+                // position, not the stale anchor. The old code pulled the
+                // display to the anchor while the anchor itself moved on —
+                // the display structurally lagged, the error grew every
+                // interval (log: 8 -> 29 -> 50 m) until the 50 m hard snap
+                // fired: the big backward jumps. The expected position is
+                // anchor + v*age (walked along the route); the display
+                // closes that gap at an error-scaled rate (1 m/s when
+                // close, up to ~25% of the error when far) — smooth at any
+                // anchor cadence. Hard snap ONLY for real teleports
+                // (> 50 m from the expected position too).
+                val expected = if (extrapSpeedMs > 0.3)
+                    advanceAlongRoute(pts, pos, extrapSpeedMs * ((now - anchorAtMs) / 1000.0)) ?: pos
+                else pos
                 val dp = displayPos
-                if (dp != null && extrapSpeedMs > 0.3) {
-                    val errM = distanceM(dp, pos)
-                    if (errM > 50.0) {
-                        displayPos = pos
-                        synchronized(trail) { trail.clear() }
-                        trailMetres = 0.0
-                    } else {
-                        displayPos = ALatLon(dp.latitude + (pos.latitude - dp.latitude) * 0.4,
-                                            dp.longitude + (pos.longitude - dp.longitude) * 0.4)
-                    }
+                if (dp == null || distanceM(dp, expected) > 50.0) {
+                    displayPos = expected
+                    synchronized(trail) { trail.clear() }
+                    trailMetres = 0.0
                 } else {
-                    displayPos = pos
+                    val errLat = expected.latitude - dp.latitude
+                    val errLon = expected.longitude - dp.longitude
+                    val errM = distanceM(dp, expected)
+                    if (errM > 0.05) {
+                        // error-scaled convergence: 1 m/s base, +25% of
+                        // the error per second (a 20 m gap closes in ~2 s,
+                        // a 2 m gap in <1 s), never more than half the gap
+                        val rate = (1.0 + errM * 0.25).coerceAtMost(errM * 0.5)
+                        val step = (rate / 5.0).coerceAtMost(errM) / errM
+                        displayPos = ALatLon(dp.latitude + errLat * step,
+                                            dp.longitude + errLon * step)
+                    }
                 }
             }
             // advance the display position by v*dt since the LAST display
@@ -339,15 +443,24 @@ class OsmAndNavSource(
                 }
             }
             lastDisplayAtMs = now
+            // Trail + zoom-speed from the EXTRAPOLATED display movement:
+            // posNow advances every tick (extrapolation), so the trail is
+            // continuous and the zoom speed is stable. lastVehiclePos/
+            // AtMs are OWNED BY THE ANCHOR BLOCK above — the old code
+            // overwrote them here EVERY tick with the stale position,
+            // so the anchor block measured dt=0.2 s instead of the real
+            // 3 s interval: the speed read 15x too high, failed the
+            // plausibility check and stayed 0.0 m/s FOREVER (the [POS]
+            // log showed v=0.0 while anchors moved 50-74 m per 3 s).
+            // No extrapolation, no fw DR (speed 0) — the map moved ONLY
+            // by hard snaps at every anchor: the user's jumps.
             val posNow = displayPos ?: pos
-            if (last != null && lastAt > 0 && now > lastAt) {
-                val dtS = (now - lastAt) / 1000.0
-                val distM = distanceM(last, posNow)
-                // breadcrumb: extend the trail behind the vehicle
+            val ltp = lastTrailPos
+            if (ltp != null && now > lastTrailAtMs) {
+                val dtS = (now - lastTrailAtMs) / 1000.0
+                val distM = distanceM(ltp, posNow)
                 if (distM > 4.0) {   // ignore GPS jitter below 4 m
-                    trail.add(0, LatLon(last.latitude, last.longitude))
-                    // NOTE: trail from REAL anchors only would lag; the
-                    // extrapolated positions keep it continuous.
+                    trail.add(0, LatLon(ltp.latitude, ltp.longitude))
                     trailMetres += distM
                     while (trailMetres > 1500.0 && trail.size > 2) {
                         val drop = trail.removeAt(trail.size - 1)
@@ -362,13 +475,12 @@ class OsmAndNavSource(
                 }
                 val kmh = (distM / dtS) * 3.6
                 if (kmh <= 250.0) {
-                    val alpha = 0.2   // EMA: ~5 ticks until a new speed registers
-                                     // (slow on purpose — it only DRIVES the zoom)
+                    val alpha = 0.2   // EMA: slow on purpose — drives the zoom
                     smoothedSpeedKmh = smoothedSpeedKmh * (1 - alpha) + kmh * alpha
                 }
             }
-            lastVehiclePos = pos
-            lastVehiclePosAtMs = now
+            lastTrailPos = posNow
+            lastTrailAtMs = now
         }
 
         // 2c. Zoom in DISCRETE LEVELS (quantized target, hysteresis ±6):
@@ -422,7 +534,13 @@ class OsmAndNavSource(
             distM = distanceToM,
             limitKmh = if (currentLimitKmh > 0) currentLimitKmh else null,
             mapOn = true,
-            speedKmh = smoothedSpeedKmh.toInt().coerceIn(0, 255),
+            // EXACT DR rate: the firmware dead-reckoning interpolates
+            // between frames at this speed — it must match the rate the
+            // displayPos (frame positions) actually advance, or every
+            // frame hands off with a snap. extrapSpeedMs IS that rate.
+            // (smoothedSpeedKmh is a lagging EMA — the mismatch was the
+            // 'double drift' jitter.) The zoom keeps its own EMA.
+            speedKmh = (extrapSpeedMs * 3.6).toInt().coerceIn(0, 255),
         )
     }
 

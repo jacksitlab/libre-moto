@@ -799,6 +799,7 @@ static bool     g_dr_have = false;
 static int32_t  g_dr_dy = 0;      /* accumulated drift since the last REAL frame */
 static uint32_t g_dr_last_ms = 0;
 static int32_t  g_dr_px_s = 0;             /* world drift, px/s */
+static int32_t  g_dr_dy_milli = 0;         /* accumulated drift, milli-px */
 #define DR_TICK_MS 75
 
 /* full repaint of the last frame with offset dy — same composition as
@@ -853,6 +854,15 @@ static void dr_tick_cb(lv_timer_t *t) {
   if (!g_dr_have || active_screen != map_screen) return;
   if (g_nav.speed_kmh <= 0) return;         /* standing: nothing drifts */
   if (g_map_mux == NULL) return;
+  /* DR RE-ENABLED (the freeze regression): the guard above froze the map
+     for the whole 200 ms between frames — 5 discrete jumps/s. The DR's
+     job is to INTERPOLATE between the app's frames: the app sends
+     positions advancing at extrapSpeedMs and reports speed_kmh = exactly
+     that rate, so the drift accumulates to precisely the next frame's
+     position delta — a seamless handoff by construction. (The earlier
+     'double drift' jitter was a SPEED MISMATCH: the DR ran on a lagging
+     EMA while the frames advanced at the closed-loop rate; two slightly
+     different speeds = a snap at every frame. Sync the speeds, not off.) */
   uint32_t now = millis();
   if (!g_dr_last_ms) { g_dr_last_ms = now; return; }
   uint32_t dt = now - g_dr_last_ms;
@@ -864,11 +874,16 @@ static void dr_tick_cb(lv_timer_t *t) {
      paint INSIDE the mutex; the comm task only holds it for its own
      prepare, and our paint is ~40 ms — acceptable contention) */
   xSemaphoreTake(g_map_mux, portMAX_DELAY);
-  /* px/s = speed/3.6 m/s * scale/100 px/m */
-  g_dr_px_s = (int32_t)(((int64_t)g_nav.speed_kmh * g_map_out.scale) / 360);
-  g_dr_dy += (int32_t)(((int64_t)g_dr_px_s * dt) / 1000);
-  if (g_dr_dy > 120 || g_dr_dy < -30) g_dr_dy = 0;   /* stale/crazy → snap */
-  dr_repaint(&g_map_out, g_dr_dy);
+  /* px/s = speed/3.6 m/s * scale/100 px/m — kept in MILLI-px/s:
+     at 50 km/h and scale 48 the drift is 6.6 px/s; the old integer
+     math did 6*75/1000 = 0 per tick — the DR was DEAD below ~100
+     km/h, the map froze between frames (the '2 s nothing' gaps). */
+  int32_t px_s_milli = (int32_t)(((int64_t)g_nav.speed_kmh * g_map_out.scale * 1000) / 360);
+  g_dr_dy_milli += (int32_t)(((int64_t)px_s_milli * dt) / 1000);
+  g_dr_px_s = px_s_milli / 1000;
+  int32_t dy = g_dr_dy_milli / 1000;
+  if (dy > 120 || dy < -30) { dy = 0; g_dr_dy_milli = 0; }  /* stale/crazy → snap */
+  dr_repaint(&g_map_out, dy);
   xSemaphoreGive(g_map_mux);
 }
 
@@ -916,6 +931,7 @@ static void render_map_display(const MapRenderFrame *rf) {
   g_dr_have = true;
   g_dr_last_ms = 0;
   g_dr_dy = 0;
+  g_dr_dy_milli = 0;
 
   /* 1. paint OFFSCREEN into the PSRAM fb — the panel never shows the
         intermediate black/cleared state (that was the flicker). */
@@ -1395,6 +1411,35 @@ static void handle_serial(void) {
       li = 0;  /* reset for the next line */
       if (!line[0]) continue;
 
+      if (line[0] == 'b') {
+        /* Full-screen update benchmark: how many complete display
+           updates per second can the MCU sustain?
+           'b'  = 100x memcpy only   (pure panel-transfer ceiling)
+           'b2' = 100x full render   (map_blit + band/sign/texts + memcpy)
+           Prints fps + per-stage ms. */
+        const int N = 100;
+        uint16_t *panel_fb = (uint16_t *)gfx->getFramebuffer();
+        if (!panel_fb || !g_map_fb) { Serial.println("[BENCH] no fb"); continue; }
+        bool fullRender = (line[1] == '2');
+        Serial.printf("[BENCH] %s, %d iterations...\n",
+                      fullRender ? "FULL RENDER" : "memcpy only", N);
+        uint32_t t0 = millis();
+        for (int i = 0; i < N; i++) {
+          if (fullRender) {
+            map_blit_init(g_map_fb);
+            map_blit_frame_dy(&g_map_out, (i % 40) - 20);   /* varied dy */
+            map_blit_band();
+            map_blit_limit_sign(g_nav.limit_kmh > 0);
+            if (g_map_out.show_vehicle)
+              map_blit_vehicle(vehicle_icon_map, MAP_CX, MAP_CY, 64);
+          }
+          memcpy(panel_fb, g_map_fb, (size_t)SCREEN_W * SCREEN_H * 2);
+        }
+        uint32_t dt = millis() - t0;
+        Serial.printf("[BENCH] %d full-screen updates in %lu ms = %.1f fps\n",
+                      N, (unsigned long)dt, N * 1000.0 / dt);
+        continue;
+      }
       if (line[0] == 'h')                 goto_screen(home_screen, "home");
       else if (line[0] == 'n')            goto_screen(map_screen, "map");
       else if (line[0] == 'm' && line[1] == 't') {
