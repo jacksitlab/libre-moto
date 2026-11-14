@@ -896,9 +896,13 @@ static void render_map_display(const MapRenderFrame *rf) {
     fps_frames++;
     fps_window_ms = now - fps_last_ms;
     if (fps_window_ms >= 10000) {
+      /* FIX: the integer part divided by the 10 s window (frames*10000/
+         window) — reporting frames-per-10s as 'fps', 10x too high: the
+         user's log showed '10.9 fps (frame time 910 ms)' — impossible;
+         reality was 1.09 fps, one frame per 910 ms. */
       Serial.printf("[FPS] map: %u.%u fps (frame time %u ms avg)\n",
-                    (unsigned)(fps_frames * 10000 / fps_window_ms),
-                    (unsigned)((fps_frames * 100000 / fps_window_ms) % 10),
+                    (unsigned)(fps_frames * 1000 / fps_window_ms),
+                    (unsigned)((fps_frames * 10000 / fps_window_ms) % 10),
                     (unsigned)(fps_window_ms / fps_frames));
       fps_frames = 0;
       fps_last_ms = now;

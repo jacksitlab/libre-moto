@@ -87,8 +87,20 @@ class StreamService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        // EXACTLY ONE pump thread: onStartCommand fires on EVERY
+        // startService() call (auto-connect, nav start, screen-on, boot).
+        // The old unconditional startPump() created one thread per start
+        // — 2-3 threads each sent 5 Hz = 10-15 slightly-offset frames/s
+        // (the firmware's [FPS] 9-15), the map jumped between the
+        // threads' positions and every thread's frame reset the DR
+        // drift — the user's 'ruckeln'.
+        val current = pumpThread.get()
+        if (current?.isAlive == true) {
+            Log.d(TAG, "pump already running — no second thread")
+            return START_STICKY
+        }
         running = true
-        startPump()
+        startPump()   // startPump() replaces the (dead) reference atomically
         return START_STICKY
     }
 
@@ -97,8 +109,16 @@ class StreamService : Service() {
         // binder call into OsmAnd, which the main looper must not wait for.
         val t = Thread {
             while (running) {
+                val cycleStart = android.os.SystemClock.elapsedRealtime()
                 try { pumpOnce() } catch (e: Exception) { Log.d(TAG, "pump: ${e.message}") }
-                try { pumpSleep.tryAcquire(200, java.util.concurrent.TimeUnit.MILLISECONDS) } catch (_: InterruptedException) { break }
+                // FIXED TICTOC (the stutter fix): the old code slept a
+                // FLAT 200 ms ON TOP of the work (60+300 ms) -> a ~1.5 Hz
+                // pump. Now the sleep fills the REST of a 200 ms cycle:
+                // work + sleep = 200 ms -> a steady 5 Hz regardless of
+                // how long a frame took.
+                val workMs = android.os.SystemClock.elapsedRealtime() - cycleStart
+                val restMs = (PUMP_PERIOD_MS - workMs).coerceAtLeast(0)
+                try { pumpSleep.tryAcquire(restMs, java.util.concurrent.TimeUnit.MILLISECONDS) } catch (_: InterruptedException) { break }
             }
         }
         t.name = "LibreMoto-pump"
@@ -117,6 +137,10 @@ class StreamService : Service() {
      *  needs writes to reject) and lets the firmware see the link is
      *  alive. 5 s = far below the 15 s link timeout, negligible airtime. */
     private var lastBeatMs = 0L
+    private var pumpStat = 0
+
+    /** Fixed pump cycle: work + sleep = 200 ms -> 5 Hz steady. */
+    private val PUMP_PERIOD_MS = 200L
     private val beatIntervalMs = 5_000L
 
     private fun pumpOnce() {
@@ -124,7 +148,10 @@ class StreamService : Service() {
         val s = source ?: return
         if (!b.isReady) return
 
+        val t0 = android.os.SystemClock.elapsedRealtime()
         s.refresh()
+        val tRefresh = android.os.SystemClock.elapsedRealtime() - t0
+        val t1 = android.os.SystemClock.elapsedRealtime()
         val nav = s.navData()
         if (!s.isNavigating) {
             val now = System.currentTimeMillis()
@@ -144,9 +171,18 @@ class StreamService : Service() {
         if (mapEnabled) {
             try {
                 val f = s.mapFrame(nextSeq())
-                b.sendMap(f.encode())
+                val t2 = android.os.SystemClock.elapsedRealtime()
+                val bytes = f.encode()
+                val t3 = android.os.SystemClock.elapsedRealtime()
+                b.sendMap(bytes)
+                val t4 = android.os.SystemClock.elapsedRealtime()
+                if (++pumpStat >= 25) {   // every 25 frames = ~5 s at 5 Hz
+                    pumpStat = 0
+                    Log.d(TAG, "pump timing: refresh=${tRefresh}ms navData=${t1 - t0 - tRefresh}ms " +
+                        "mapFrame=${t2 - t1}ms encode=${t3 - t2}ms sendMap=${t4 - t3}ms")
+                }
             } catch (e: Exception) {
-                Log.d(TAG, "Map: error ${e.message}")
+                Log.d(TAG, "pump timing: refresh=${tRefresh}ms — Map: error ${e.message}")
             }
         }
         // once a minute: TX health (callbacks vs pacing, queue depth)

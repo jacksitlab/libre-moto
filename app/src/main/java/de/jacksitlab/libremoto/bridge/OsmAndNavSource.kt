@@ -92,6 +92,17 @@ class OsmAndNavSource(
     @Volatile private var smoothedSpeedKmh = 0.0
     @Volatile private var lastVehiclePos: ALatLon? = null
     @Volatile private var lastVehiclePosAtMs = 0L
+    /** Position extrapolation (the sawtooth fix): the last REAL OsmAnd
+     *  position and when it was seen; each pump tick walks the vehicle
+     *  along the route by v*dt so all 5 frames/s carry a fresh position. */
+    @Volatile private var anchorPos: ALatLon? = null
+    @Volatile private var anchorAtMs = 0L
+    @Volatile private var extrapSpeedMs = 0.0   // m/s along the route
+    /** The position the frames should show: the extrapolated vehicle
+     *  position (anchor + v*elapsed along the route). mapFrame reads
+     *  this instead of the raw stale routePoints[0]. */
+    @Volatile private var displayPos: ALatLon? = null
+    @Volatile private var lastDisplayAtMs = 0L
 
     /** Breadcrumb trail behind the vehicle (most recent first): the road we
      *  actually rode. OsmAnd cuts the passed segment from the route, so the
@@ -261,19 +272,82 @@ class OsmAndNavSource(
             headingDeg10 = smoothHeadingDeg10
         }
 
-        // 2b. Speed from vehicle movement (routePoints[0] = position, 1 Hz ticks)
-        //     EMA-smoothed; skips implausible jumps (> 250 km/h).
+        // 2b. Speed from vehicle movement (routePoints[0] = position).
+        //     The ANCHOR logic: OsmAnd updates the position ~1 Hz while
+        //     the pump ticks 5 Hz. We remember the last REAL position and
+        //     its timestamp; between real updates every tick extrapolates
+        //     along the route polyline (v*dt), so frames carry a moving
+        //     position instead of frozen-then-jumping.
         if (pts.isNotEmpty()) {
             val pos = pts[0]
             val now = System.currentTimeMillis()
             val last = lastVehiclePos
             val lastAt = lastVehiclePosAtMs
+            // REAL update? (position changed or first sight)
+            if (last == null || distanceM(last, pos) > 1.0) {
+                if (last != null && lastAt > 0) {
+                    val dtReal = (now - lastAt) / 1000.0
+                    val dReal = distanceM(last, pos)
+                    if (dtReal > 0.05 && dReal / dtReal < 70.0) {   // < 250 km/h
+                        // EMA on the speed: OsmAnd delivers anchors in
+                        // ~2 s steps with snapping jitter — a raw d/dt
+                        // jumps frame to frame and the map ping-pongs
+                        val v = dReal / dtReal
+                        extrapSpeedMs = extrapSpeedMs * 0.5 + v * 0.5
+                    }
+                }
+                anchorPos = pos
+                anchorAtMs = now
+                lastVehiclePos = pos
+                lastVehiclePosAtMs = now
+                // RE-ANCHOR, two-tier (ping-pong fix + teleport sync):
+                // - small error (<= 50 m: GPS drift + extrapolation noise):
+                //   SOFT — pull 40 % toward the anchor, the rest decays
+                //   over the next anchors. A hard snap here made the map
+                //   lurch forward/backward every ~2 s (OsmAnd's interval).
+                // - big error (> 50 m: simulation reset, route recalc,
+                //   teleport): HARD sync — snap fully and drop the trail
+                //   (the road 'behind us' is elsewhere now). A soft pull
+                //   would crawl for minutes (user: after a simulated
+                //   km-jump it never caught up).
+                val dp = displayPos
+                if (dp != null && extrapSpeedMs > 0.3) {
+                    val errM = distanceM(dp, pos)
+                    if (errM > 50.0) {
+                        displayPos = pos
+                        synchronized(trail) { trail.clear() }
+                        trailMetres = 0.0
+                    } else {
+                        displayPos = ALatLon(dp.latitude + (pos.latitude - dp.latitude) * 0.4,
+                                            dp.longitude + (pos.longitude - dp.longitude) * 0.4)
+                    }
+                } else {
+                    displayPos = pos
+                }
+            }
+            // advance the display position by v*dt since the LAST display
+            // step (the position integrates itself; the anchor only steers)
+            val dp = displayPos
+            if (dp != null && extrapSpeedMs > 0.3) {   // ignore jitter below ~1 km/h
+                val dtDisp = (now - lastDisplayAtMs) / 1000.0
+                if (dtDisp > 0.02 && dtDisp < 2.0) {
+                    val adv = extrapSpeedMs * dtDisp
+                    if (adv > 0.02 && adv < 100.0) {
+                        val moved = advanceAlongRoute(pts, dp, adv)
+                        if (moved != null) displayPos = moved
+                    }
+                }
+            }
+            lastDisplayAtMs = now
+            val posNow = displayPos ?: pos
             if (last != null && lastAt > 0 && now > lastAt) {
                 val dtS = (now - lastAt) / 1000.0
-                val distM = distanceM(last, pos)
+                val distM = distanceM(last, posNow)
                 // breadcrumb: extend the trail behind the vehicle
                 if (distM > 4.0) {   // ignore GPS jitter below 4 m
                     trail.add(0, LatLon(last.latitude, last.longitude))
+                    // NOTE: trail from REAL anchors only would lag; the
+                    // extrapolated positions keep it continuous.
                     trailMetres += distM
                     while (trailMetres > 1500.0 && trail.size > 2) {
                         val drop = trail.removeAt(trail.size - 1)
@@ -366,9 +440,31 @@ class OsmAndNavSource(
             return FrameBuilder.fallbackFrame(seq, headingDeg10, dynamicScale, distanceToM)
         }
 
+        // The vehicle position the frame CENTRES on: the extrapolated
+        // displayPos (fresh every pump tick), not OsmAnd's stale pts[0].
+        val vehicle = displayPos ?: pts[0]
+
         // route + streets through the SHARED FrameBuilder (also used by the
         // end-to-end preview test — no divergence between test and app)
-        val route = pts.map { LatLon(it.latitude, it.longitude) }
+        // BOUND to ~5 km of arc length: OsmAnd delivers the WHOLE remaining
+        // route — a long tour is 10k+ points, and every one of them was
+        // allocated, converted and clipped per frame at 5 Hz. The visible
+        // window needs ~1.2 km; 5 km is generous margin.
+        val route = ArrayList<LatLon>(1024)
+        if (pts.size >= 2) {
+            val lat0 = vehicle.latitude
+            val mLon = 111320.0 * Math.cos(Math.toRadians(lat0))
+            route.add(LatLon(lat0, vehicle.longitude))
+            var acc = 0.0
+            for (i in 1 until pts.size) {
+                val a = pts[i - 1]; val b = pts[i]
+                val dLat = (b.latitude - a.latitude) * 111320.0
+                val dLon = (b.longitude - a.longitude) * mLon
+                acc += Math.sqrt(dLat * dLat + dLon * dLon)
+                route.add(LatLon(b.latitude, b.longitude))
+                if (acc >= 5000.0) break
+            }
+        }
         val streets = nearbyRoads.map { r ->
             StreetRoad(r.roadType, r.points.map { LatLon(it.latitude, it.longitude) })
         }
@@ -454,6 +550,41 @@ class OsmAndNavSource(
     }
 
     /** Pull the active route geometry from OsmAnd. Called on connect + on recalc + every tick. */
+    /** Walk `distM` metres along the route polyline starting at `from`
+     *  (nearest point on the first segments). Returns the advanced
+     *  position or null if the route is too short. */
+    private fun advanceAlongRoute(pts: List<ALatLon>, from: ALatLon, distM: Double): ALatLon? {
+        if (pts.size < 2) return null
+        // find the segment containing `from` (nearest segment start)
+        var si = 0
+        var bestD = Double.MAX_VALUE
+        val lim = minOf(pts.size - 1, 40)
+        for (i in 0 until lim) {
+            val d = distanceM(pts[i], from)
+            if (d < bestD) { bestD = d; si = i }
+        }
+        var remaining = distM
+        var i = si
+        // START AT `from` (not at pts[si]): starting at the nearest VERTEX
+        // rounded every call up to ±5 m differently — the map jittered
+        // around the true position and aggravated the anchor jumps.
+        var cur: ALatLon = from
+        while (i < pts.size - 1 && remaining > 0) {
+            val nxt = pts[i + 1]
+            val segLen = distanceM(cur, nxt)
+            if (segLen <= remaining) {
+                remaining -= segLen
+                cur = nxt
+                i++
+            } else {
+                val t = remaining / segLen
+                return ALatLon(cur.latitude + (nxt.latitude - cur.latitude) * t,
+                               cur.longitude + (nxt.longitude - cur.longitude) * t)
+            }
+        }
+        return cur
+    }
+
     private fun pullRouteGeometry() {
         val s = svc ?: return
         try {
@@ -519,7 +650,25 @@ class OsmAndNavSource(
      *  away and the correct side is nearer). Returns 0 if nothing
      *  qualifies. */
     private fun routeRoadMaxspeed(roads: List<LmmRoad>, lat: Double, lon: Double): Int {
-        val route = routePoints.map { LatLon(it.latitude, it.longitude) }
+        // BOUND to ~3 km of arc length: the road under the vehicle decides
+        // the limit; scanning OsmAnd's whole remaining route (long tours:
+        // 10k+ points) built a giant contact index per call on the
+        // background thread.
+        val full = routePoints
+        val route = ArrayList<LatLon>(768)
+        if (full.size >= 2) {
+            val mLon = 111320.0 * Math.cos(Math.toRadians(full[0].latitude))
+            route.add(LatLon(full[0].latitude, full[0].longitude))
+            var acc = 0.0
+            for (i in 1 until full.size) {
+                val a = full[i - 1]; val b = full[i]
+                val dLat = (b.latitude - a.latitude) * 111320.0
+                val dLon = (b.longitude - a.longitude) * mLon
+                acc += Math.sqrt(dLat * dLat + dLon * dLon)
+                route.add(LatLon(b.latitude, b.longitude))
+                if (acc >= 3000.0) break
+            }
+        }
         if (route.size < 2) return nearestRoadMaxspeed(roads, lat, lon)
         var best = Double.MAX_VALUE
         var bestSpeed = 0

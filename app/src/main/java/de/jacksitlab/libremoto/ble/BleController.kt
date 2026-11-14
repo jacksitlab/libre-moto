@@ -42,13 +42,21 @@ private const val CH_NAV = 0x01
 private const val CH_MAP = 0x02
 private const val CH_CTL = 0x03
 private const val CH_GAP = 0x04
-/** Pause after the last map chunk of a frame. The firmware closes frames
- *  deterministically (magic), so this only bounds the latency of the very
- *  last frame — 120 ms is plenty and keeps the stream flowing. */
-private const val MAP_GAP_MS = 120L
-/** TX pacing: a write slot is released after this time even when the stack
- *  never delivers onCharacteristicWrite (proven on the test tablet). */
-private const val TX_PACE_MS = 40L
+/* Pause after the last map chunk of a frame. The firmware closes frames
+ * deterministically (magic), so this only bounds the latency of the very
+ * last frame. 30 ms: at the 5 Hz pump the TX budget is 200 ms per cycle
+ * (5 write slots a 40 ms) and a cycle needs nav + 2-3 map chunks + THIS
+ * gap wait — at 120 ms the demand was 240 ms/cycle, the queue grew
+ * until the >8 guard DROPPED EVERY MAP FRAME (user: nav arrived, no
+ * [MAP] on the display). 30 ms keeps a cycle at ~150 ms < 200 ms. */
+private const val MAP_GAP_MS = 30L
+/* TX pacing: a write slot is released after this time even when the stack
+ * never delivers onCharacteristicWrite (proven on the test tablet).
+ * 25 ms: the MTU-256 link (measured) carries 3-4 chunks per map frame;
+ * at 40 ms the drain was 160-200 ms + gap per frame — the measured map
+ * rate was 1.6-3.9 fps. A write needs ~10-15 ms in the stack; 25 ms
+ * keeps a 10 ms margin and drains a 4-chunk frame in ~100 ms. */
+private const val TX_PACE_MS = 25L
 
 class BleController(private val context: Context, log: (String) -> Unit) {
     /** Log line sink (UI-free, test-friendly). In the app this sink is wired to
@@ -98,9 +106,17 @@ class BleController(private val context: Context, log: (String) -> Unit) {
         @Volatile var pacedWrites = 0L        // writes released by the 40 ms timer
         @Volatile var active = false         // set once the GATT link is usable
         @Volatile var rejects = 0            // consecutive writeCharacteristic rejections
+        @Volatile var frameEnqueueMs = 0L    // sendMap start (drain measurement)
     }
     @Volatile private var droppedMaps = 0L
     @Volatile private var lastMapDropLog = 0L
+    @Volatile private var lastDrainMs = 0L
+    @Volatile private var drainMsAvg = 0
+    @Volatile private var drainStat = 0
+    @Volatile private var sentMaps = 0L
+    @Volatile private var sentMapsWindow = 0L
+    @Volatile private var droppedMapsWindow = 0L
+    @Volatile private var lastMapRateLog = 0L
     @Volatile private var lastMapWriteAtMs = 0L
 
     /** Dedicated TX thread (pacing + gap timing). NOT the main looper:
@@ -154,6 +170,18 @@ class BleController(private val context: Context, log: (String) -> Unit) {
                         return
                     }
                     Tx.queue.poll()          // gap elapsed — consume marker
+                    // drain measurement: the whole frame (first chunk
+                    // enqueued .. gap consumed) tells the REAL link speed
+                    if (Tx.frameEnqueueMs > 0) {
+                        val drain = System.currentTimeMillis() - Tx.frameEnqueueMs
+                        lastDrainMs = drain
+                        if (++drainStat >= 10) {
+                            drainStat = 0
+                            log("map drain: ${drainMsAvg / 10} ms avg per frame (${"%.1f".format(1000.0 / (drainMsAvg / 10.0))} fps max)")
+                            drainMsAvg = 0
+                        }
+                        drainMsAvg += drain.toInt()
+                    }
                 }
                 else -> {
                     val g = gatt.get() ?: run { clearTx("gatt weg"); return }
@@ -444,19 +472,43 @@ class BleController(private val context: Context, log: (String) -> Unit) {
         val chunk = mapChunk
         // Header (11 B) + segments must not exceed the protocol frame budget;
         // encoding already guarantees ≤ MAX_FRAME (4096 B).
-        // Refuse a second concurrent frame: at 1 Hz and full BLE throughput a
-        // frame takes ~0.5 s, but if the link is congested we drop the new one.
-        val queued = Tx.queue.size
-        if (queued > 8) {
+        // ONE MAP FRAME IN FLIGHT (steady-rate self-pacing): the 5 Hz pump
+        // can enqueue faster than the link drains (chunks x 40 ms pacing +
+        // nav + gap). The old >8 guard dropped frames in BURSTS — 5 in a
+        // row through, then 5 dropped — which reads as jank. Now: while
+        // any chunk of the previous frame is still queued, the new frame
+        // is skipped. The map rate settles at exactly what the link
+        // sustains, EVENLY SPACED; DR on the display interpolates between
+        // real frames, so a steady 2-4 fps looks smooth where a bursty
+        // 5-attempt rate does not.
+        var mapPending = false
+        for (item in Tx.queue) {
+            if ((item[0].toInt() and 0xFF) == CH_MAP) { mapPending = true; break }
+        }
+        if (mapPending) {
             droppedMaps++
+            droppedMapsWindow++
             val now = System.currentTimeMillis()
             if (now - lastMapDropLog > 5000) {
-                log("map: frame dropped (queue=$queued, total $droppedMaps) — link slower than 1 Hz")
+                log("map: skipped (previous frame still in flight, total $droppedMaps) — link paces itself")
                 lastMapDropLog = now
             }
             return
         }
         val n = (frame.size + chunk - 1) / chunk
+        sentMaps++
+        Tx.frameEnqueueMs = System.currentTimeMillis()
+        val now2 = System.currentTimeMillis()
+        if (now2 - lastMapRateLog >= 10000) {
+            if (lastMapRateLog > 0) {
+                val dt = (now2 - lastMapRateLog) / 1000.0
+                log("map: ${"%.1f".format(sentMapsWindow / dt)} fps sent, $droppedMapsWindow skipped (10 s window)")
+            }
+            lastMapRateLog = now2
+            sentMapsWindow = 0
+            droppedMapsWindow = 0
+        }
+        sentMapsWindow++
         log("TX map  (${frame.size}B, $n Chunks)")
         // Precompute magic-safe chunk boundaries: no continuation chunk may
         // start with 4C 4D 01 (would falsely close the frame at the firmware —

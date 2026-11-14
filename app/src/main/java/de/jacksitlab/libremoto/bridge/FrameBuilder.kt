@@ -115,6 +115,12 @@ object FrameBuilder {
      *   WHOLE street, width byte = edge distance from the highway type
      * - byte budget: 3000 B for streets (each = 3 header + pts*4)
      */
+    // phase profiling (throttled log every 25 frames)
+    private var fbStatFrames = 0
+    private var fbStatContact = 0L
+    private var fbStatClip = 0L
+    private var fbStatRest = 0L
+
     fun buildFrame(seq: Int, headingDeg10: Int, scale100: Int,
                    route: List<LatLon>, streets: List<StreetRoad>,
                    trail: List<LatLon> = emptyList(),
@@ -196,20 +202,56 @@ object FrameBuilder {
         // Crossing streets are additionally LENGTH-LIMITED around their
         // contact point (300 m ≈ the visible circle) so they don't run
         // to the horizon.
-        val contactPath = if (trail.size >= 2) route + trail else route
+        val tPhase0 = android.os.SystemClock.elapsedRealtime()
+        // Contact path BOUNDED: route+trail clipped to the streets' bbox
+        // + 320 m margin (a street can cross the route at most ~300 m
+        // beyond its own points — the cut length). OsmAnd long tours are
+        // 10k+ route points; indexing all of them made the contact phase
+        // 1.2-3.5 s per frame (measured). Only the part that can touch
+        // streets is indexed.
+        val sMinLatT = if (streets.isEmpty()) ref.latitude else streets.minOf { it.points.minOf { p -> p.latitude } } - 320.0 / 111320.0
+        val sMaxLatT = if (streets.isEmpty()) ref.latitude else streets.maxOf { it.points.maxOf { p -> p.latitude } } + 320.0 / 111320.0
+        val mLonT = 111320.0 * kotlin.math.cos(Math.toRadians(ref.latitude))
+        val sMinLonT = if (streets.isEmpty()) ref.longitude else streets.minOf { it.points.minOf { p -> p.longitude } } - 320.0 / mLonT
+        val sMaxLonT = if (streets.isEmpty()) ref.longitude else streets.maxOf { it.points.maxOf { p -> p.longitude } } + 320.0 / mLonT
+        fun contactSlice(path: List<LatLon>): List<LatLon> {
+            if (path.size < 2) return path
+            var i0 = -1
+            for (i in path.indices) {
+                val p = path[i]
+                if (p.latitude in sMinLatT..sMaxLatT && p.longitude in sMinLonT..sMaxLonT) {
+                    if (i0 < 0) i0 = if (i > 0) i - 1 else 0   // keep one point before
+                    // find the first point beyond the box + one after
+                }
+            }
+            if (i0 < 0) return path.subList(0, 2)   // no overlap: minimal
+            var i1 = path.size - 1
+            for (i in path.indices.reversed()) {
+                val p = path[i]
+                if (p.latitude in sMinLatT..sMaxLatT && p.longitude in sMinLonT..sMaxLonT) {
+                    i1 = if (i < path.size - 1) i + 1 else i
+                    break
+                }
+            }
+            return path.subList(i0, i1 + 1)
+        }
+        val contactPath = if (trail.size >= 2) contactSlice(route + trail) else contactSlice(route)
         val maxContactLenM = 300.0
+        // ONE grid index over the bounded path, shared by every street's
+        // contact test + cut (the per-point lookups are O(1))
+        val contactIdx = MapProjector.RouteContactIndex(contactPath, ref.latitude)
         val corridorStreets = ArrayList<StreetRoad>(streets.size)
         var culled = 0
         for (s in streets) {
             if (s.points.size < 2) continue
-            when (MapProjector.streetRouteContact(s.points, contactPath, ref.latitude)) {
+            when (MapProjector.streetRouteContact(s.points, contactIdx)) {
                 MapProjector.CONTACT_ALONG ->
                     // the road we DRIVE on: full length, no cut — the A115
                     // case (800 m of roads=0 on the motorway)
                     corridorStreets.add(s)
                 MapProjector.CONTACT_CROSS -> {
-                    val cut = MapProjector.cutToContactLength(s.points, contactPath,
-                                                              maxContactLenM, ref.latitude)
+                    val cut = MapProjector.cutToContactLength(s.points, contactIdx,
+                                                              maxContactLenM)
                     if (cut.size >= 2)
                         corridorStreets.add(StreetRoad(s.roadType, cut))
                 }
@@ -219,6 +261,7 @@ object FrameBuilder {
         if (log != null && culled > 0 && corridorStreets.size + culled > 8) {
             log("contact: ${corridorStreets.size} relevant, $culled culled")
         }
+        val tPhase1 = android.os.SystemClock.elapsedRealtime()
         val candidates = corridorStreets
 
         // 1. CLIP every street to the visible window — long streets used to
@@ -230,6 +273,7 @@ object FrameBuilder {
         //    every clipped segment: the clipped first point MOVES along the
         //    window edge as the vehicle moves, so it would make a new key
         //    per frame — the anchor is stable for the street's lifetime.
+        val tPhase2 = android.os.SystemClock.elapsedRealtime()
         data class Clipped(val roadType: String, val pts: List<LatLon>, val rank: Int,
                            val anchor: Long)
         val clipped = ArrayList<Clipped>()
@@ -392,6 +436,18 @@ object FrameBuilder {
                 totalSegs++
                 budgetBytes -= (3 + rPts.size * 4)
                 sentAnchors.addAll(street.anchors)
+            }
+        }
+        if (log != null) {
+            fbStatFrames++
+            fbStatContact += (tPhase1 - tPhase0)
+            fbStatClip += (tPhase2 - tPhase1)
+            fbStatRest += (android.os.SystemClock.elapsedRealtime() - tPhase2)
+            if (fbStatFrames >= 25) {
+                log("fb phases: contact=${fbStatContact / fbStatFrames}ms " +
+                    "clip=${fbStatClip / fbStatFrames}ms rest=${fbStatRest / fbStatFrames}ms " +
+                    "(${streets.size} streets in, ${corridorStreets.size} relevant)")
+                fbStatFrames = 0; fbStatContact = 0; fbStatClip = 0; fbStatRest = 0
             }
         }
         prevFrameStreetKeys = sentAnchors

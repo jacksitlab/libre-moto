@@ -260,80 +260,147 @@ object MapProjector {
     const val CONTACT_CROSS = 1
     const val CONTACT_ALONG = 2
 
-    fun streetRouteContact(pts: List<LatLon>, route: List<LatLon>,
-                           refLat: Double): Int {
-        if (pts.size < 2 || route.size < 2) return CONTACT_NONE
-        val mLat = METERS_PER_DEG_LAT
-        val mLon = METERS_PER_DEG_LAT * kotlin.math.cos(Math.toRadians(refLat))
+    /* ---- Route contact index (the 2 fps fix, take 2) ------------------
+     * The first fix (route subsample to 8 m) barely helped: OsmAnd route
+     * points arrive every ~5 m, so 8 m subsampling only cut the segment
+     * count ~1.6x (240 -> 150) — measured contact stayed at 193-357 ms.
+     * The real structure: the scan is O(street pts x route segs) and the
+     * route is LONG. A 30 m grid fixes the lookup: each route segment is
+     * registered in every cell its bbox touches; a point query scans the
+     * 3x3 neighbourhood — a segment within 15 m of the point is always
+     * registered there. Point tests become ~O(1).
+     *
+     * Built ONCE per frame in FrameBuilder and shared by all streets;
+     * the 3-arg streetRouteContact() builds one per call for the other
+     * callers (routeRoadMaxspeed, tests — background paths). */
+    class RouteContactIndex(route: List<LatLon>, refLat: Double) {
+        private val mLat = METERS_PER_DEG_LAT
+        private val mLon = METERS_PER_DEG_LAT * kotlin.math.cos(Math.toRadians(refLat))
+        private val cellLat = 30.0 / mLat
+        private val cellLon = 30.0 / mLon
+        /** route subsampled to >= 8 m spacing (first/last kept). */
+        val pts: List<LatLon>
+        private val grid = HashMap<Long, ArrayList<Int>>()
+
+        init {
+            val sub = ArrayList<LatLon>(route.size / 4 + 4)
+            if (route.size >= 2) {
+                var lastKept = route.first()
+                sub.add(lastKept)
+                for (i in 1 until route.size - 1) {
+                    val p = route[i]
+                    val dLat = (p.latitude - lastKept.latitude) * mLat
+                    val dLon = (p.longitude - lastKept.longitude) * mLon
+                    if (dLat * dLat + dLon * dLon >= 8.0 * 8.0) { sub.add(p); lastKept = p }
+                }
+                if (sub.last() != route.last()) sub.add(route.last())
+            }
+            pts = if (sub.size >= 2) sub else route
+            for (i in 0 until pts.size - 1) {
+                val a = pts[i]; val b = pts[i + 1]
+                val la0 = latIdx(minOf(a.latitude, b.latitude))
+                val la1 = latIdx(maxOf(a.latitude, b.latitude))
+                val lo0 = lonIdx(minOf(a.longitude, b.longitude))
+                val lo1 = lonIdx(maxOf(a.longitude, b.longitude))
+                for (la in la0..la1) for (lo in lo0..lo1)
+                    grid.getOrPut(pack(la, lo)) { ArrayList(2) }.add(i)
+            }
+        }
+
+        private fun latIdx(lat: Double) = Math.floor(lat / cellLat).toInt()
+        private fun lonIdx(lon: Double) = Math.floor(lon / cellLon).toInt()
+        private fun pack(la: Int, lo: Int) =
+            ((la.toLong()) shl 32) or (lo.toLong() and 0xFFFFFFFFL)
+
+        /** True if any route segment is within 15 m of p (early exit). */
+        fun within15(p: LatLon): Boolean {
+            val la = latIdx(p.latitude); val lo = lonIdx(p.longitude)
+            for (dla in -1..1) for (dlo in -1..1) {
+                val segs = grid[pack(la + dla, lo + dlo)] ?: continue
+                for (si in segs)
+                    if (pointSegmentDistM(p, pts[si], pts[si + 1], mLat, mLon) <= 15.0) return true
+            }
+            return false
+        }
+
+        /** Min distance from p to the (indexed) route, in metres. */
+        fun distToRoute(p: LatLon): Double {
+            val la = latIdx(p.latitude); val lo = lonIdx(p.longitude)
+            var best = Double.MAX_VALUE
+            for (dla in -1..1) for (dlo in -1..1) {
+                val segs = grid[pack(la + dla, lo + dlo)] ?: continue
+                for (si in segs) {
+                    val d = pointSegmentDistM(p, pts[si], pts[si + 1], mLat, mLon)
+                    if (d < best) best = d
+                }
+            }
+            return best
+        }
+
+        /** Route segments whose bbox shares a grid cell with the street
+         *  segment's bbox (a crossing implies a shared cell — no expansion
+         *  needed). Deduped into `out` (caller reuses the set). */
+        fun segmentsNear(a1: LatLon, a2: LatLon, out: MutableSet<Int>) {
+            val la0 = latIdx(minOf(a1.latitude, a2.latitude))
+            val la1 = latIdx(maxOf(a1.latitude, a2.latitude))
+            val lo0 = lonIdx(minOf(a1.longitude, a2.longitude))
+            val lo1 = lonIdx(maxOf(a1.longitude, a2.longitude))
+            for (la in la0..la1) for (lo in lo0..lo1) {
+                val segs = grid[pack(la, lo)] ?: continue
+                out.addAll(segs)
+            }
+        }
+    }
+
+    /** Contact classification against a prebuilt index (fast path used
+     *  by FrameBuilder — one index per frame, all streets share it). */
+    fun streetRouteContact(pts: List<LatLon>, idx: RouteContactIndex): Int {
+        if (pts.size < 2 || idx.pts.size < 2) return CONTACT_NONE
 
         // (c) route runs ALONG the street = the road we DRIVE on.
-        //     Two sufficient proofs, either one wins:
-        //     1. ≥ 4 CONSECUTIVE street points within 15 m of the route —
-        //        a crossing puts only 1-2 points that close; 4 in a row is
-        //        driving on it. Robust for LONG ways: a motorway way spans
-        //        kilometres, the route covers 1.2 km of it — a percentage
-        //        of the WHOLE way fails (A115 at 52.4425,13.2030: 18.6 %
-        //        < 20 % threshold → the own road was culled AGAIN).
-        //     2. ≥ 20 % of the street's points near the route (short city
-        //        ways where the route covers most of the street).
         var run = 0; var bestRun = 0; var near = 0
         for (p in pts) {
-            var isNear = false
-            for (j in 0 until route.size - 1) {
-                val d = pointSegmentDistM(p, route[j], route[j + 1], mLat, mLon)
-                if (d <= 15.0) { isNear = true; break }
-            }
-            if (isNear) { near++; run++; if (run > bestRun) bestRun = run }
+            if (idx.within15(p)) { near++; run++; if (run > bestRun) bestRun = run }
             else run = 0
         }
         if (bestRun >= 4 || near * 5 >= pts.size) return CONTACT_ALONG
 
-        // (a) any street segment crosses any route segment (bbox-reject)
+        // (a) any street segment crosses any route segment
+        val cand = HashSet<Int>(16)
         for (i in 0 until pts.size - 1) {
             val a1 = pts[i]; val a2 = pts[i + 1]
-            val aMinLat = minOf(a1.latitude, a2.latitude); val aMaxLat = maxOf(a1.latitude, a2.latitude)
-            val aMinLon = minOf(a1.longitude, a2.longitude); val aMaxLon = maxOf(a1.longitude, a2.longitude)
-            for (j in 0 until route.size - 1) {
-                val b1 = route[j]; val b2 = route[j + 1]
+            idx.segmentsNear(a1, a2, cand)
+            for (j in cand) {
+                val b1 = idx.pts[j]; val b2 = idx.pts[j + 1]
+                val aMinLat = minOf(a1.latitude, a2.latitude); val aMaxLat = maxOf(a1.latitude, a2.latitude)
+                val aMinLon = minOf(a1.longitude, a2.longitude); val aMaxLon = maxOf(a1.longitude, a2.longitude)
                 if (b2.latitude < aMinLat || b1.latitude > aMaxLat) continue
                 if (maxOf(b1.longitude, b2.longitude) < aMinLon ||
                     minOf(b1.longitude, b2.longitude) > aMaxLon) continue
                 if (segmentsCross(a1, a2, b1, b2)) return CONTACT_CROSS
             }
+            cand.clear()
         }
-        // (b) T-junction: a street ENDPOINT on the route (≤ 15 m)
-        for (p in listOf(pts.first(), pts.last())) {
-            for (j in 0 until route.size - 1) {
-                val d = pointSegmentDistM(p, route[j], route[j + 1],
-                                          METERS_PER_DEG_LAT, mLon)
-                if (d <= 15.0) return CONTACT_CROSS
-            }
-        }
+        // (b) T-junction: a street ENDPOINT on the route
+        if (idx.within15(pts.first()) || idx.within15(pts.last())) return CONTACT_CROSS
         return CONTACT_NONE
     }
 
-    /** Backwards-compatible boolean view of streetRouteContact. */
-    fun streetTouchesRoute(pts: List<LatLon>, route: List<LatLon>,
-                           refLat: Double): Boolean =
-        streetRouteContact(pts, route, refLat) != CONTACT_NONE
+    /** Legacy 3-arg form: builds an index per call (background callers). */
+    fun streetRouteContact(pts: List<LatLon>, route: List<LatLon>,
+                           refLat: Double): Int =
+        streetRouteContact(pts, RouteContactIndex(route, refLat))
 
-    /** Bound a crossing street's drawn length: keep at most `maxLenM`
-     *  of polyline around its CLOSEST contact point with the route —
-     *  crossing streets no longer run to the horizon. */
-    fun cutToContactLength(pts: List<LatLon>, route: List<LatLon>,
-                           maxLenM: Double, refLat: Double): List<LatLon> {
-        if (pts.size < 2 || route.size < 2) return pts
-        val mLat = METERS_PER_DEG_LAT
-        val mLon = METERS_PER_DEG_LAT * kotlin.math.cos(Math.toRadians(refLat))
-        // find the street point closest to the route = the contact
+    /** Bound a crossing street's drawn length around its closest contact
+     *  with the route — index form (shared per-frame index). */
+    fun cutToContactLength(pts: List<LatLon>, idx: RouteContactIndex,
+                           maxLenM: Double): List<LatLon> {
+        if (pts.size < 2 || idx.pts.size < 2) return pts
         var bestIdx = 0; var bestD = Double.MAX_VALUE
         for (i in pts.indices) {
-            for (j in 0 until route.size - 1) {
-                val d = pointSegmentDistM(pts[i], route[j], route[j + 1], mLat, mLon)
-                if (d < bestD) { bestD = d; bestIdx = i }
-            }
+            val d = idx.distToRoute(pts[i])
+            if (d < bestD) { bestD = d; bestIdx = i }
         }
-        // walk outward from the contact until maxLenM is used up
         var budget = maxLenM
         var lo = bestIdx
         while (lo > 0) {
@@ -349,6 +416,16 @@ object MapProjector {
         }
         return pts.subList(lo, hi + 1)
     }
+
+    /** Legacy 4-arg cutToContactLength (index built per call). */
+    fun cutToContactLength(pts: List<LatLon>, route: List<LatLon>,
+                           maxLenM: Double, refLat: Double): List<LatLon> =
+        cutToContactLength(pts, RouteContactIndex(route, refLat), maxLenM)
+
+    /** Backwards-compatible boolean view of streetRouteContact. */
+    fun streetTouchesRoute(pts: List<LatLon>, route: List<LatLon>,
+                           refLat: Double): Boolean =
+        streetRouteContact(pts, route, refLat) != CONTACT_NONE
 
     /** Point-to-point distance in metres (equirectangular, refLat). */
     private fun haversineM(a: LatLon, b: LatLon): Double {
