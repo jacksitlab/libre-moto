@@ -55,16 +55,13 @@ Details in [`docs/hardware.md`](docs/hardware.md).
 │   ├── design.md            # UI screens, state machine, colors
 │   └── partition_table/     # elecrow_s3 partition scheme (boards.txt + csv)
 ├── firmware/
-│   ├── src/libre-moto/
-│   │   ├── libre-moto.ino   # main sketch (Arduino IDE project = this folder)
-│   │   └── config.h         # pins, display init, settings
+│   ├── esp-idf/            # ESP-IDF project (the firmware build) — main/, hal/ board drivers
+│   ├── src/libre-moto/     # config.h + generated assets (logo/icon/maneuver/vehicle)
 │   ├── src/nav/             # NavState struct + hand-rolled JSON parser + tests
 │   ├── src/ble/             # GATT server (NavData, Status, MapData, Control)
 │   ├── src/map/             # MapData binary frame (protocol.md §4)
-│   ├── test/                # native C++ unit tests (g++ — no Arduino needed)
-│   ├── libraries/           # vendored Arduino libraries (GFX_Library_for_Arduino,
-│   │                        #   lvgl 9.5.0 + lv_conf.h, Adafruit_CST8XX_Library,
-│   │                        #   Adafruit_BusIO, PCF8574_library)
+│   ├── test/                # native C++ unit tests (g++ — no hardware needed)
+│   ├── libraries/           # vendored lvgl 9.5.0 + lv_conf.h (IDF component)
 │   └── README_TESTS.md      # how to build & run the native unit tests
 └── app/                     # Android companion app (Kotlin, classic XML, minSdk 29)
     ├── build.gradle.kts     # Gradle Kotlin DSL, single module
@@ -85,21 +82,19 @@ The osmAnd AIDL client copy lives under `app/src/main/aidl/net/osmand/aidl/` (15
 
 ## Setup Dev Env
 
-- Install Arduino IDE 2.X
-- Install Arduino Partition Scheme from `docs/partition_table/`
-- Setup IDE:
-    - Board: ESP32S3 Dev Module
-    - CPU Frequency: 240MHz (WiFi)
-    - Flash Mode: QIO 80MHz
-    - Flash Size: 16MB (128Mb)
-    - PSRAM: OPI PSRAM
-    - USB CDC On Boot: Enabled
-    - USB Mode: Hardware CDC and JTAG
-    - Upload Mode: UART0 / Hardware CDC
-    - Upload Speed: 921600
-    - Partition Scheme: elecrow_s3
+The firmware builds with **ESP-IDF** (v5.3 or v6.x):
 
-The Arduino IDE project is the `firmware/src/libre-moto` folder (the `.ino` file defines the project); libraries are picked up from `firmware/libraries/`.
+```bash
+cd firmware/esp-idf
+idf.py set-target esp32s3
+idf.py build
+idf.py -p /dev/ttyACM0 flash monitor
+```
+
+The Arduino IDE project is gone (the sketch was retired after the
+ESP-IDF port reached feature parity on hardware); `firmware/src/` keeps
+the shared protocol/render sources + generated assets that BOTH the
+IDF build and the host tests compile from.
 
 ## Roadmap / milestones
 
@@ -116,11 +111,9 @@ The Arduino IDE project is the `firmware/src/libre-moto` folder (the `.ino` file
 
 ### Firmware
 
-- **Toolchain:** Arduino IDE 2.X (or `arduino-cli`). Project folder = `firmware/src/libre-moto/`.
-- **Core:** [esp32](https://github.com/espressif/arduino-esp32) ≥ 3.3 (BLE via classic Bluedroid API — see `firmware/src/ble/`).
-- **Display:** [Arduino_GFX](https://github.com/moononournation/Arduino_GFX) + [LVGL 9.5](https://lvgl.io) (vendored, `LV_USE_FLOAT=0` → all coordinates are `int32_t`).
-- **Touch:** [Adafruit_CST8XX_Library](https://github.com/adafruit/Adafruit_CST8XX) (CST816).
-- **I/O expander (LCD touch reset/IRQ):** PCF8574 (I²C 0x21, [PCF8574_library](https://github.com/robotics-community/PCF8574_library)).
+- **Build system:** ESP-IDF v5.3+ (project root `firmware/esp-idf/`), version-adaptive — builds on v5.3.2 and v6.0.x.
+- **Board drivers:** `firmware/esp-idf/main/hal/` — one file set per board (currently CrowPanel: ST7701 RGB panel, CST816 touch, PCF8574 expander). A new board = a new hal file set, selected in `main/CMakeLists.txt`.
+- **Display:** LVGL 9.5 (vendored under `firmware/libraries/lvgl`, built as an IDF component; `LV_USE_FLOAT=0` → all coordinates are `int32_t`).
 - **JSON parsing:** hand-rolled (no ArduinoJson) — see `firmware/src/nav/nav_message_parse_impl.h`. This keeps the firmware build free of template bloat.
 - **Native unit tests (no hardware needed):**
   ```bash

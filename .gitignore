@@ -1,14 +1,20 @@
-# Build
+# Build outputs (any build/ dir: Arduino, ESP-IDF, Gradle, CMake)
 build/
 *.elf
 *.bin
 *.hex
 *.map
-*.hex
 
-# IDE
+# ESP-IDF (firmware/esp-idf/) — generated per build
+firmware/esp-idf/sdkconfig
+firmware/esp-idf/sdkconfig.old
+firmware/esp-idf/managed_components/
+firmware/esp-idf/dependencies.lock
+
+# IDE / editor
 .vscode/
 .idea/
+*.iml
 *.swp
 *~
 .DS_Store
@@ -16,18 +22,18 @@ build/
 # PlatformIO
 .pio/
 
-# Arduino-IDE
+# Arduino IDE
 ArduinoSketch/
 *.ino.bak
 
-# Android
-phone/.gradle/
-phone/app/build/
-phone/build/
-phone/local.properties
-phone/.idea/
+# Android app (app/)
+app/.gradle/
+app/local.properties
+app/gradle/wrapper/gradle-wrapper.jar
+app/src/test/resources/*.pbf
+app/src/test/resources/*.lmm
 
-# CMake/CTest
+# CMake / CTest
 CMakeCache.txt
 CTestTestfile.cmake
 Testing/
@@ -40,12 +46,14 @@ Testing/
 
 # Logs
 *.log
-serial_capture.log
 
-# Host unit-test binaries (built on the dev machine, not in the repo)
+# Host unit-test binaries (compiled on the dev machine, not committed)
 firmware/test/test_*
 !firmware/test/*.cpp
 !firmware/test/*.h
+
+# OsmAnd fork build output
 osmand-build
 
+# Kilo AI tool
 .kilo/

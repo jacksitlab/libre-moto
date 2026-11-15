@@ -1,0 +1,63 @@
+# Libre-Moto ESP-IDF configuration defaults (ESP32-S3, CrowPanel 2.1")
+#
+# Mirrors the Arduino board options the sketch needs:
+#   PartitionScheme=elecrow_s3 (custom 10 MB app partition)
+#   PSRAM=opi                  (S3R8 octal PSRAM)
+
+# Target: ESP32-S3 (set once by `idf.py set-target esp32s3`)
+
+# Octal PSRAM on the ESP32-S3R8 (Arduino board option "PSRAM: OPI PSRAM").
+# NOTE: IDF v6 renamed CONFIG_ESP32S3_SPIRAM -> CONFIG_SPIRAM (see
+# components/esp_hw_support/sdkconfig.rename.esp32s3). CONFIG_SPIRAM exists
+# since IDF v5.0, so setting only the new name covers both versions.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+# 120 MHz octal is experimental in v6 (temperature-sensitive); 80 MHz is
+# the stable choice and ample for the RGB panel DMA (12 MHz PCLK).
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
+CONFIG_SPIRAM_USE_MALLOC=y
+
+# CPU 240 MHz
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# Custom partition table (same layout as the Arduino build)
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# FreeRTOS tick rate: MUST be 1000 Hz (the Arduino core default). At 100 Hz
+# pdMS_TO_TICKS(5) == 0 and vTaskDelay(0) never blocks — the comm task
+# busy-spins and starves IDLE1 until the task watchdog fires.
+CONFIG_FREERTOS_HZ=1000
+
+# Bluedroid (the Arduino build uses the same stack via BLEDevice.h).
+# NOTE: no BTDM_CTRL_MODE_* here — that choice exists only on the classic
+# ESP32; the S3 controller is BLE-only (mode 1) and rejects BTDM.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=y
+CONFIG_BT_GATTS_ENABLE=y
+CONFIG_BT_BLE_50_FEATURES_SUPPORTED=n
+CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
+CONFIG_BT_SMP_ENABLE=y
+# (BT_GATT_SEND_SERVICE_CHANGE_MANUALLY was renamed in IDF v6 to
+#  BT_GATTS_SEND_SERVICE_CHANGE_*; AUTO default is fine for our
+#  single static service — we never send service-change indications.)
+
+# Serial flash: 16 MB (CrowPanel ESP32-S3R8 module)
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+
+# Do not poison freed heap memory (matches Arduino behaviour)
+CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT=y
+
+# LVGL fonts (Kconfig overrides lv_conf.h defaults; the sketch uses 14/18/20/24/34)
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_18=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_24=y
+CONFIG_LV_FONT_MONTSERRAT_34=y
+
+# Console: the CrowPanel's USB-C is the ESP32-S3 native USB Serial/JTAG
+# (no bridge chip). Logs go to the USB CDC port; UART0 stays as secondary.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
