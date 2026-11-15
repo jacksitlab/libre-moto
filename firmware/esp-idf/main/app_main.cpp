@@ -1251,7 +1251,8 @@ extern "C" void app_main(void) {
      * Animated variant A "assembly" (website intro): the ticker runs from
      * the display loop while BLE init proceeds in parallel. */
     splash_anim_start();
-    g_splash_until_ms = lm_millis() + splash_anim_total_ms + 400;
+    /* hold the finished logo for 1 s before the UI takes over */
+    g_splash_until_ms = lm_millis() + splash_anim_total_ms + 1000;
 
     create_home_screen();
     create_map_screen();
