@@ -42,6 +42,7 @@
 #include "panel.h"
 #include "touch.h"
 #include "splash.h"
+#include "splash_anim.h"
 #include "serial_cmd.h"
 #include "ble_gatt.h"
 
@@ -1246,9 +1247,11 @@ extern "C" void app_main(void) {
         ESP_LOGE(TAG, "[FATAL] no map fb - LVGL DIRECT mode impossible");
     }
 
-    /* Splash painted straight into the panel fb (NO LVGL render at boot) */
-    splash_paint(g_panel_fb);
-    g_splash_until_ms = lm_millis() + 2000;
+    /* Splash painted straight into the panel fb (NO LVGL render at boot).
+     * Animated variant A "assembly" (website intro): the ticker runs from
+     * the display loop while BLE init proceeds in parallel. */
+    splash_anim_start();
+    g_splash_until_ms = lm_millis() + splash_anim_total_ms + 400;
 
     create_home_screen();
     create_map_screen();
@@ -1289,6 +1292,7 @@ extern "C" void app_main(void) {
         serial_cmd_poll();
         drain_ui_queue();
         if (g_splash_until_ms) {
+            if (!splash_anim_done()) splash_anim_tick(g_panel_fb);
             handle_state_timeouts();
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;

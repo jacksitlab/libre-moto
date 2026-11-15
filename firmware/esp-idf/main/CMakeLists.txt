@@ -89,6 +89,7 @@ target_sources(${COMPONENT_LIB} PRIVATE
     "${ASSET_DIR}/libremoto_logo.c"
     "${ASSET_DIR}/maneuver_icons.c"
     "${ASSET_DIR}/vehicle_icon.c"
+    "${ASSET_DIR}/splash_anim.c"
 )
 
 # -Wno-error=comment: the generated maneuver_icons.h carries a literal "/*"
