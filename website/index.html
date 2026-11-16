@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="de" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title data-i18n="home-title">LibreMoto — Open-Source-Navi für den Lenker</title>
+  <meta name="description" content="LibreMoto — open-source handlebar navigation for motorcycles: ESP32-S3 round touch display, OsmAnd + BLE, GPLv3. / LibreMoto — offene Lenker-Navigation für Motorräder: ESP32-S3 Runddisplay, OsmAnd + BLE, GPLv3.">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link href="vendor/bootstrap/bootstrap.min.css" rel="stylesheet">
+  <link href="css/site.css" rel="stylesheet">
+</head>
+<body>
+  <a class="visually-hidden-focusable" href="#content" data-i18n="skip-content">Zum Inhalt springen</a>
+
+  <nav class="navbar navbar-expand-md lm-navbar sticky-top">
+    <div class="container">
+      <a class="navbar-brand d-flex align-items-center gap-2" href="index.html">
+        <img src="favicon.svg" alt="" width="28" height="28">
+        <span class="brand-word">Libre<span class="text-lm-orange">Moto</span></span>
+      </a>
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#nav" aria-controls="nav" aria-expanded="false" aria-label="Menu">
+        <span class="navbar-toggler-icon"></span>
+      </button>
+      <div class="collapse navbar-collapse" id="nav">
+        <ul class="navbar-nav ms-auto mb-2 mb-md-0 align-items-md-center gap-md-2">
+          <li class="nav-item"><a class="nav-link active" aria-current="page" href="index.html" data-i18n="nav-home">Start</a></li>
+          <li class="nav-item"><a class="nav-link" href="setup.html" data-i18n="nav-setup">Setup</a></li>
+          <li class="nav-item"><a class="nav-link" href="hardware.html" data-i18n="nav-hardware">Hardware</a></li>
+          <li class="nav-item"><a class="nav-link" href="faq.html" data-i18n="nav-faq">FAQ</a></li>
+          <li class="nav-item">
+            <a class="nav-link" href="https://github.com/jacksitlab/libre-moto" target="_blank" rel="noopener">
+              GitHub <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+            </a>
+          </li>
+          <li class="nav-item d-flex gap-1 ms-md-2">
+            <button class="btn btn-sm lang-btn" data-lang="de" type="button">DE</button>
+            <button class="btn btn-sm lang-btn" data-lang="en" type="button">EN</button>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </nav>
+
+  <main id="content">
+    <section class="hero">
+      <div class="container">
+        <div class="stage play a">
+          <div class="glow"></div>
+          <svg class="logo" viewBox="0 0 255 100" role="img" aria-label="LibreMoto">
+            <rect class="bg" x="0" y="0" width="255" height="100"/>
+            <g class="logo-all">
+              <g class="word-libre">
+                <path class="ch l-l" d="m 31.680012,65.454431 h 5.390666 l -7.412165,20.503768 h 16.781656 l -1.66854,4.524307 h -22.07606 z"/>
+                <path class="ch l-i" d="m 54.622427,72.128588 -6.577894,18.353918 h 5.069792 l 6.642069,-18.514358 z"/>
+                <path class="ch l-dot" d="m 55.264173,69.722038 h 5.422752 l 1.604365,-4.331777 h -5.358577 z"/>
+                <path class="ch l-b" d="m 71.751693,65.491071 -5.172811,0.0455 -7.431071,20.929978 c -0.703331,2.20117 0.416795,3.843647 2.314071,3.902597 l 15.554089,0.0801 c 1.92686,0.016 4.140449,-1.786447 4.642086,-3.307807 l 3.843694,-10.759024 c 0.94782,-3.546357 -1.34067,-4.313317 -2.36006,-4.311357 l -13.912325,0.016 z m -3.443718,10.776594 11.438579,0.032 c 0.441223,-0.0133 0.674834,0.15457 0.465604,0.70642 l -3.080432,8.406714 c -0.170558,0.39412 -0.313414,0.81315 -0.898653,0.83406 H 64.874076 c -0.374474,-0.0136 -0.549318,-0.2122 -0.33693,-0.76998 l 3.096452,-8.631514 c 0.181559,-0.45457 0.241582,-0.58964 0.674377,-0.57774 z"/>
+                <path class="ch l-r" d="m 89.948628,90.449416 h -5.263877 l 5.127747,-14.339531 c 0.69338,-1.9317 3.794317,-4.160767 5.400017,-4.129427 h 10.981555 l -1.31597,4.265557 h -8.258865 c -1.27208,-0.035 -1.68168,0.19851 -2.0874,1.31597 z"/>
+                <path class="ch l-e" d="m 113.18224,71.935118 c -1.99861,0.0204 -4.43004,1.946147 -5.35471,4.174937 l -3.99304,10.890794 c -0.40878,1.47159 0.91815,3.462767 3.04012,3.448367 h 17.51625 l 1.63349,-4.129457 h -15.74633 c -0.53436,-0.0115 -0.88046,-0.39825 -0.72605,-0.77101 l 0.817,-2.223637 h 16.51734 l 2.76831,-7.623817 c 0.65128,-2.13242 -0.90688,-3.776777 -2.35955,-3.766177 z m 0.26096,4.140827 h 10.13065 c 0.53166,-5.8e-4 0.87219,0.14794 0.70332,0.66921 l -0.98702,2.609137 h -11.40086 l 1.02061,-2.790517 c 0.0904,-0.32457 0.32642,-0.48827 0.5333,-0.48783 z"/>
+              </g>
+              <g class="word-moto">
+                <path class="ch m-m" d="m 135.64458,90.358656 h -5.17313 l 8.89415,-24.958045 4.71934,0.0454 4.94623,15.564741 16.24543,-15.610121 h 4.8101 l -8.93952,25.003425 h -5.03699 l 5.58152,-15.791631 -13.61348,13.205074 h -2.0874 l -4.62859,-13.794994 z"/>
+                <path class="ch m-o1" d="m 175.5774,71.980588 c -1.80684,-0.0136 -4.31814,1.913147 -5.03691,3.630267 l -3.85712,11.525904 c -0.50646,1.69896 1.11729,3.232627 2.5864,3.222027 h 14.83889 c 2.39137,-0.0499 4.37863,-1.780687 4.99143,-3.357937 l 3.9026,-11.027224 c 0.81623,-2.808247 -1.44342,-4.016137 -3.72122,-3.993037 z m 0.9126,4.351667 h 10.34821 c 0.56761,-0.005 0.60779,0.59108 0.48111,1.01028 l -2.9037,8.006224 c -0.27007,0.77358 -0.8609,0.81492 -1.45986,0.80202 h -9.99526 c -0.61249,7.5e-4 -0.67678,-0.50671 -0.5457,-0.97875 l 2.85564,-8.149884 c 0.20326,-0.62258 0.82811,-0.69989 1.21956,-0.68989 z"/>
+                <path class="ch m-o2" d="m 218.36146,72.166958 c -1.80684,-0.0136 -4.31814,1.913147 -5.03691,3.630267 l -3.85712,11.525904 c -0.50646,1.69896 1.11729,3.232627 2.5864,3.222027 h 14.83889 c 2.39137,-0.0499 4.37863,-1.780687 4.99143,-3.357937 l 3.9026,-11.027224 c 0.81623,-2.808247 -1.44342,-4.016137 -3.72122,-3.993037 z m 0.9126,4.351667 h 10.34821 c 0.56761,-0.005 0.60779,0.59108 0.48111,1.01028 l -2.9037,8.006224 c -0.27007,0.77358 -0.8609,0.81492 -1.45986,0.80202 h -9.99526 c -0.61249,7.5e-4 -0.67678,-0.50671 -0.5457,-0.97875 l 2.85564,-8.149884 c 0.20326,-0.62258 0.82811,-0.69989 1.21956,-0.68989 z"/>
+                <path class="ch m-t" d="m 205.66327,90.404036 h -8.62187 c -1.82571,0.0528 -3.39417,-1.316377 -2.26891,-4.810097 l 3.35799,-9.393304 h -2.94959 l 1.49748,-4.310927 h 2.76808 l 1.81513,-4.946237 h 5.17313 l -1.679,4.900857 h 6.94288 l -1.49749,4.310937 h -6.94288 l -3.04034,8.667244 c -0.32061,0.84136 -0.27558,1.47168 0.36303,1.4521 h 6.6706 z"/>
+              </g>
+              <g class="fx">
+                <path class="needle" d="m 239.28858,89.723356 c 6.44158,-18.373268 -7.77534,-44.914597 -38.16313,-35.077389 11.32262,-5.772117 21.80135,-5.901047 32.5816,3.403367 7.16657,7.682167 11.97492,16.845331 5.58153,31.674022 z"/>
+                <path class="sw-main" d="m 244.41633,93.262866 c 5.24485,-16.743751 1.53727,-26.905935 -3.63026,-34.215212 -5.65635,-5.804267 -14.4851,-16.138186 -35.44044,-11.752964 3.73045,-2.339378 7.73169,-4.204868 11.02692,-7.305896 1.88974,-1.705723 1.235,-4.496788 -0.18151,-6.579852 -6.09518,-8.998934 -18.13619,-18.505172 -29.45051,-23.8689767 2.2177,2.7636667 4.68194,5.2345527 5.03699,10.2101137 0.77749,9.518827 -20.19694,15.490215 -22.18999,15.768953 6.57911,-3.253555 11.20841,-6.144354 15.20173,-8.916832 -9.07592,-4.022101 -23.74301,-9.118806 -36.80179,-8.304228 -7.43692,1.111954 -11.05868,3.598148 -13.43197,5.468086 -5.1066,3.978339 -9.67297,8.65126 -14.38492,13.137011 -4.62845,4.193868 -5.0523,6.558208 -11.29919,5.672286 -8.42657,-0.572164 -16.574322,-1.701902 -24.640419,-2.994967 l -3.72101,-4.76472 c 7.796267,1.424907 16.426064,2.315773 24.640409,2.813455 5.18102,0.416961 8.69157,0.0506 11.84373,-3.040345 l 14.06727,-14.430296 c 4.42613,-4.469464 10.4456,-6.947258 18.74123,-6.579851 19.90538,1.068465 29.17233,7.750627 36.21188,11.798355 7.00246,-7.272929 0.95795,-12.519809 -7.39666,-20.1479597 6.69374,0.291159 15.47602,3.302281 28.04378,12.9328117 5.6751,4.694991 10.40442,7.985661 13.97651,15.564752 1.90747,2.709772 2.39941,4.806145 0.68067,5.944556 l -5.17312,3.811775 c 11.50008,0.566721 18.65233,5.111229 24.50427,10.845396 14.10764,15.932661 8.41011,30.857212 3.7664,38.934549 z"/>
+                <path class="sw-mid" d="m 180.02454,53.239237 30.0858,-15.973141 c 0.60017,-0.40293 0.65899,-0.777136 -0.13613,-0.998323 l -11.7076,-3.494127 c 4.0036,-0.08801 8.25369,0.617866 13.25046,1.633619 3.81645,0.88681 5.19038,2.771405 1.36135,5.263881 -10.99819,5.869723 -23.02192,10.210104 -32.85388,13.568091 z"/>
+                <path class="sw-left" d="M 9.9013442,93.217486 C 5.1696255,82.883352 4.5029325,62.285314 21.654322,51.56024 42.417976,38.726984 60.523926,49.29133 68.257824,57.232527 65.378602,49.4382 43.22597,33.624827 19.521543,48.9283 0.25803171,60.413824 2.5644806,84.078922 9.9013442,93.217486 Z"/>
+                <path class="sw-left2" d="M 14.711444,90.267896 C 12.695448,81.299562 11.506459,70.425238 21.726283,60.121164 29.809353,53.237087 40.305625,48.80501 54.28131,53.783777 47.16994,49.6011 31.685989,47.35442 20.066082,58.775384 8.5482062,70.668548 10.951562,83.549642 14.711444,90.267896 Z"/>
+                <path class="speedline" d="M 69.846062,41.168629 22.970294,23.334961 72.478005,27.237494 c 1.943572,0.190989 3.035905,0.889409 4.038666,2.314294 l 7.71997,10.028601 C 81.610897,39.304662 78.908212,36.197983 76.244401,34.361887 74.99619,33.508652 73.95995,32.869197 72.659517,32.63751 L 39.442612,27.010603 Z"/>
+              </g>
+            </g>
+          </svg>
+          <div class="sheen"></div>
+        </div>
+
+        <div class="text-center mt-4 px-2">
+          <p class="lead lm-lead mx-auto mb-1" data-i18n="hero-lead">Ein rundes Touch-Display für den Motorrad-Lenker, das Navigationsanweisungen und eine minimalistische Karte direkt am Griff zeigt — angesteuert per Bluetooth Low Energy von deinem Smartphone. Kein Proprietärsystem, keine Cloud: freie Software auf freier Hardware.</p>
+          <p class="text-lm-orange small fw-semibold mb-4" data-i18n="hero-badge">Open Source · GPLv3</p>
+          <div class="d-flex gap-2 justify-content-center flex-wrap">
+            <a href="setup.html" class="btn btn-lm-orange btn-lg" data-i18n="hero-btn-setup">Setup ansehen</a>
+            <a href="https://github.com/jacksitlab/libre-moto" class="btn btn-outline-lm btn-lg" target="_blank" rel="noopener" data-i18n="hero-btn-github">Auf GitHub ansehen</a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="lm-section">
+      <div class="container">
+        <h2 class="lm-section-title h4" data-i18n="home-features-title">Prinzipien</h2>
+        <p class="lm-lead mb-4"></p>
+        <div class="row g-3">
+          <div class="col-12 col-md-6 col-lg-4">
+            <div class="lm-card p-4">
+              <h3 class="h6 fw-semibold" data-i18n="feat-distraction-title">Ablenkungsarm</h3>
+              <p class="mb-0 text-secondary small" data-i18n="feat-distraction-text">Eine Ansicht, die nur das zeigt, was auf der Straße zählt: nächste Anweisung, Entfernung, Tempo­limit. Keine Benachrichtigungen, kein Scrollen.</p>
+            </div>
+          </div>
+          <div class="col-12 col-md-6 col-lg-4">
+            <div class="lm-card p-4">
+              <h3 class="h6 fw-semibold" data-i18n="feat-map-title">Minimale Karte</h3>
+              <p class="mb-0 text-secondary small" data-i18n="feat-map-text">Eine klare Vektor-Karte — Route weiß, Straßen schwarz mit weißem Rand — rotiert mit deiner Fahrtrichtung. Keine Kacheln, kein Rendern auf dem Display.</p>
+            </div>
+          </div>
+          <div class="col-12 col-md-6 col-lg-4">
+            <div class="lm-card p-4">
+              <h3 class="h6 fw-semibold" data-i18n="feat-opensource-title">Frei & offen</h3>
+              <p class="mb-0 text-secondary small" data-i18n="feat-opensource-text">Firmware und App stehen unter GPLv3. Kein geschlossenes Produkt darf aus diesem Code gebaut werden — bewusste Entscheidung.</p>
+            </div>
+          </div>
+          <div class="col-12 col-md-6 col-lg-4">
+            <div class="lm-card p-4">
+              <h3 class="h6 fw-semibold" data-i18n="feat-privacy-title">Deine Daten bleiben deine</h3>
+              <p class="mb-0 text-secondary small" data-i18n="feat-privacy-text">Das Display kennt nur die Route, die dein Telefon ohnehin kennt. Kein Konto, keine Telemetrie, kein Standort-Upload.</p>
+            </div>
+          </div>
+          <div class="col-12 col-md-6 col-lg-4">
+            <div class="lm-card p-4">
+              <h3 class="h6 fw-semibold" data-i18n="feat-brain-title">Telefon ist das Gehirn</h3>
+              <p class="mb-0 text-secondary small" data-i18n="feat-brain-text">Das Telefon berechnet Route und Kartenprojektion und sendet fertige Vektordaten — das Display rendert nur. Dadurch: minimales RAM, stabile Übertragung.</p>
+            </div>
+          </div>
+          <div class="col-12 col-md-6 col-lg-4">
+            <div class="lm-card p-4">
+              <h3 class="h6 fw-semibold" data-i18n="feat-gloves-title">Handschuh-tauglich</h3>
+              <p class="mb-0 text-secondary small" data-i18n="feat-gloves-text">Große Ziele, klare Zustände, keine Mini-Buttons. Bedienung per Tippen, Halten und Wischen — mit Handschuhen.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="lm-section">
+      <div class="container">
+        <h2 class="lm-section-title h4" data-i18n="home-how-title">Wie es zusammensteckt</h2>
+        <p class="lm-lead mb-4" data-i18n="home-how-text">Drei Teile, ein Datenfluss: OsmAnd navigiert, die LibreMoto-App projiziert und sendet, das Display rendert.</p>
+        <div class="row g-3 align-items-stretch">
+          <div class="col-12 col-md-4">
+            <div class="lm-card p-4 h-100">
+              <h3 class="h6 fw-semibold" data-i18n="flow-phone-title">Smartphone</h3>
+              <p class="mb-0 text-secondary small" data-i18n="flow-phone-text">OsmAnd berechnet die Route. Die LibreMoto-App liest sie über die AIDL-API und lädt regionale Vektorkarten (.lmm) aus OpenStreetMap-Daten.</p>
+            </div>
+          </div>
+          <div class="col-12 col-md-1 d-none d-md-flex align-items-center justify-content-center">
+            <span class="lm-flow-arrow" aria-hidden="true">→</span>
+          </div>
+          <div class="col-12 col-md-3">
+            <div class="lm-card p-4 h-100">
+              <h3 class="h6 fw-semibold" data-i18n="flow-ble-title">BLE-Verbindung</h3>
+              <p class="mb-0 text-secondary small" data-i18n="flow-ble-text">Bluetooth Low Energy mit eigenem GATT-Protokoll: Navigationsdaten als JSON, Kartenframes als kompaktes Binärformat.</p>
+            </div>
+          </div>
+          <div class="col-12 col-md-1 d-none d-md-flex align-items-center justify-content-center">
+            <span class="lm-flow-arrow" aria-hidden="true">→</span>
+          </div>
+          <div class="col-12 col-md-3">
+            <div class="lm-card p-4 h-100">
+              <h3 class="h6 fw-semibold" data-i18n="flow-display-title">Display</h3>
+              <p class="mb-0 text-secondary small" data-i18n="flow-display-text">ESP32-S3 mit rundem 2,1″-Touchdisplay rendert Karte und Anweisung — ohne eigenes Routing, ohne Kachel-Download.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="lm-section pt-0">
+      <div class="container">
+        <div class="lm-card p-4 p-md-5 text-center">
+          <h2 class="lm-section-title h4" data-i18n="home-status-title">Projektstatus</h2>
+          <p class="lm-lead mx-auto mb-4" data-i18n="home-status-text">LibreMoto ist aktiv in Entwicklung. Firmware und App sind funktionsfähig und auf echter Hardware im Einsatz — der erste Release (v0.1.0) steht noch aus.</p>
+          <a href="https://github.com/jacksitlab/libre-moto#readme" class="btn btn-outline-lm" target="_blank" rel="noopener" data-i18n="home-status-btn">Roadmap im Repo</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="lm-footer">
+    <div class="container">
+      <div class="row g-4">
+        <div class="col-12 col-md-6 col-lg-4">
+          <h2 data-i18n="footer-project-title">Projekt</h2>
+          <ul>
+            <li><a href="https://github.com/jacksitlab/libre-moto" target="_blank" rel="noopener">GitHub</a></li>
+            <li><a href="https://github.com/jacksitlab/libre-moto/issues" target="_blank" rel="noopener">Issues</a></li>
+          </ul>
+        </div>
+        <div class="col-12 col-md-6 col-lg-4">
+          <h2 data-i18n="footer-docs-title">Dokumentation</h2>
+          <ul>
+            <li><a href="https://github.com/jacksitlab/libre-moto/blob/main/README.md" target="_blank" rel="noopener" data-i18n="footer-docs-readme">README (Repo)</a></li>
+            <li><a href="https://github.com/jacksitlab/libre-moto/blob/main/docs/protocol.md" target="_blank" rel="noopener" data-i18n="footer-docs-protocol">BLE-Protokoll</a></li>
+            <li><a href="hardware.html" data-i18n="footer-docs-hardware">Hardware-Referenz</a></li>
+            <li><a href="https://github.com/jacksitlab/libre-moto/blob/main/docs/design.md" target="_blank" rel="noopener" data-i18n="footer-docs-design">UI-Design</a></li>
+          </ul>
+        </div>
+        <div class="col-12 col-md-6 col-lg-4">
+          <h2 data-i18n="footer-legal-title">Rechtliches</h2>
+          <ul>
+            <li><a href="https://github.com/jacksitlab/libre-moto/blob/main/LICENSE" target="_blank" rel="noopener" data-i18n="footer-license">Lizenz (GPLv3)</a></li>
+          </ul>
+        </div>
+      </div>
+      <p class="footer-note mt-4 mb-0" data-i18n="footer-note">LibreMoto ist freie Software (GPLv3). „Beeline“ und „Beeline Moto II“ sind Marken ihrer jeweiligen Eigentümer; LibreMoto ist ein unabhängiges Projekt und steht in keiner Verbindung zu Beeline.</p>
+    </div>
+  </footer>
+
+  <script src="vendor/bootstrap/bootstrap.bundle.min.js"></script>
+  <script src="js/i18n.js"></script>
+</body>
+</html>

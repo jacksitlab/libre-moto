@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="de" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title data-i18n="hw-title">Hardware — LibreMoto</title>
+  <meta name="description" content="LibreMoto hardware: ESP32-S3, round 2.1&quot; 480×480 touch display, BLE, USB-C power. Open hardware, HAL-based board support.">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link href="vendor/bootstrap/bootstrap.min.css" rel="stylesheet">
+  <link href="css/site.css" rel="stylesheet">
+</head>
+<body>
+  <a class="visually-hidden-focusable" href="#content" data-i18n="skip-content">Zum Inhalt springen</a>
+
+  <nav class="navbar navbar-expand-md lm-navbar sticky-top">
+    <div class="container">
+      <a class="navbar-brand d-flex align-items-center gap-2" href="index.html">
+        <img src="favicon.svg" alt="" width="28" height="28">
+        <span class="brand-word">Libre<span class="text-lm-orange">Moto</span></span>
+      </a>
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#nav" aria-controls="nav" aria-expanded="false" aria-label="Menu">
+        <span class="navbar-toggler-icon"></span>
+      </button>
+      <div class="collapse navbar-collapse" id="nav">
+        <ul class="navbar-nav ms-auto mb-2 mb-md-0 align-items-md-center gap-md-2">
+          <li class="nav-item"><a class="nav-link" href="index.html" data-i18n="nav-home">Start</a></li>
+          <li class="nav-item"><a class="nav-link" href="setup.html" data-i18n="nav-setup">Setup</a></li>
+          <li class="nav-item"><a class="nav-link active" aria-current="page" href="hardware.html" data-i18n="nav-hardware">Hardware</a></li>
+          <li class="nav-item"><a class="nav-link" href="faq.html" data-i18n="nav-faq">FAQ</a></li>
+          <li class="nav-item">
+            <a class="nav-link" href="https://github.com/jacksitlab/libre-moto" target="_blank" rel="noopener">
+              GitHub <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+            </a>
+          </li>
+          <li class="nav-item d-flex gap-1 ms-md-2">
+            <button class="btn btn-sm lang-btn" data-lang="de" type="button">DE</button>
+            <button class="btn btn-sm lang-btn" data-lang="en" type="button">EN</button>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </nav>
+
+  <main id="content" class="lm-section">
+    <div class="container">
+      <h1 class="lm-section-title h2" data-i18n="hw-heading">Hardware</h1>
+      <p class="lm-lead mb-4" data-i18n="hw-lead">Bewusst einfache, offene Hardware: ein ESP32-S3, ein rundes Touchdisplay, sonst nichts. Kein geschlossenes Modul, kein Vendor-Lock-in.</p>
+
+      <div class="row g-4">
+        <div class="col-12 col-lg-6">
+          <div class="lm-card p-4 h-100">
+            <h2 class="h5 fw-semibold mb-3" data-i18n="hw-spec-title">Technische Daten (CrowPanel 2,1″)</h2>
+            <table class="table lm-spec">
+              <tbody>
+                <tr><th scope="row" data-i18n="hw-spec-mcu">Mikrocontroller</th><td data-i18n="hw-spec-mcu-v">ESP32-S3R8 — dual-core Xtensa LX7, 240 MHz, 512 KB SRAM, 8 MB PSRAM, 16 MB Flash</td></tr>
+                <tr><th scope="row" data-i18n="hw-spec-display">Display</th><td data-i18n="hw-spec-display-v">2,1″ IPS, 480×480 px, rund, RGB-parallel, ST7701S-Treiber, ~460 Nits</td></tr>
+                <tr><th scope="row" data-i18n="hw-spec-touch">Eingabe</th><td data-i18n="hw-spec-touch-v">CST816-Touch über I²C — Tippen, Halten, Wischen (kein Drehgeber)</td></tr>
+                <tr><th scope="row" data-i18n="hw-spec-io">I/O-Expander</th><td data-i18n="hw-spec-io-v">PCF8574 (I²C) für Reset-, IRQ- und LCD-Power-Signale</td></tr>
+                <tr><th scope="row" data-i18n="hw-spec-power">Stromversorgung</th><td data-i18n="hw-spec-power-v">5 V über USB-C</td></tr>
+                <tr><th scope="row" data-i18n="hw-spec-link">Anbindung</th><td data-i18n="hw-spec-link-v">Bluetooth Low Energy (GATT-Server)</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="col-12 col-lg-6">
+          <div class="lm-card p-4 h-100">
+            <h2 class="h5 fw-semibold mb-3" data-i18n="hw-boards-title">Boards</h2>
+            <p class="text-secondary small mb-3" data-i18n="hw-boards-text">Die Firmware hat eine Hardware-Abstraktionsschicht (HAL) — pro Board ein Treibersatz, ausgewählt beim Build. Aktuell unterstützt:</p>
+            <div class="d-flex flex-column gap-3">
+              <div>
+                <h3 class="h6 fw-semibold mb-1">CrowPanel 2,1″</h3>
+                <p class="text-secondary small mb-0" data-i18n="hw-board-crowpanel">Elecrow CrowPanel 2,1″ — ESP32-S3, ST7701S 480×480, CST816-Touch. Das Referenz-Board des Projekts.</p>
+              </div>
+              <div>
+                <h3 class="h6 fw-semibold mb-1">Waveshare AMOLED 1.75C</h3>
+                <p class="text-secondary small mb-0" data-i18n="hw-board-waveshare">Waveshare ESP32-S3-Touch-AMOLED-1.75C — 466×466 AMOLED über QSPI. Board-Support in Arbeit.</p>
+              </div>
+            </div>
+            <hr class="border-secondary-subtle">
+            <p class="text-secondary small mb-0" data-i18n="hw-boards-own">Eigenes Board? Die HAL-Schnittstelle ist klein: Display, Touch, Power — der Rest (Protokoll, Renderer, UI) wird geteilt.</p>
+          </div>
+        </div>
+
+        <div class="col-12">
+          <div class="lm-card p-4">
+            <h2 class="h5 fw-semibold mb-2" data-i18n="hw-mount-title">Montage & Strom</h2>
+            <p class="text-secondary mb-0" data-i18n="hw-mount-text">Das Board läuft über USB-C mit 5 V — am Motorrad direkt von einem USB-Ladegerät am Akkerausgang. Einbinden in einen Lenkerhalter ist reine Mechanik; es gibt kein proprietäres Gehäuse.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer class="lm-footer">
+    <div class="container">
+      <div class="row g-4">
+        <div class="col-12 col-md-6 col-lg-4">
+          <h2 data-i18n="footer-project-title">Projekt</h2>
+          <ul>
+            <li><a href="https://github.com/jacksitlab/libre-moto" target="_blank" rel="noopener">GitHub</a></li>
+            <li><a href="https://github.com/jacksitlab/libre-moto/issues" target="_blank" rel="noopener">Issues</a></li>
+          </ul>
+        </div>
+        <div class="col-12 col-md-6 col-lg-4">
+          <h2 data-i18n="footer-docs-title">Dokumentation</h2>
+          <ul>
+            <li><a href="https://github.com/jacksitlab/libre-moto/blob/main/README.md" target="_blank" rel="noopener" data-i18n="footer-docs-readme">README (Repo)</a></li>
+            <li><a href="https://github.com/jacksitlab/libre-moto/blob/main/docs/protocol.md" target="_blank" rel="noopener" data-i18n="footer-docs-protocol">BLE-Protokoll</a></li>
+            <li><a href="hardware.html" data-i18n="footer-docs-hardware">Hardware-Referenz</a></li>
+            <li><a href="https://github.com/jacksitlab/libre-moto/blob/main/docs/design.md" target="_blank" rel="noopener" data-i18n="footer-docs-design">UI-Design</a></li>
+          </ul>
+        </div>
+        <div class="col-12 col-md-6 col-lg-4">
+          <h2 data-i18n="footer-legal-title">Rechtliches</h2>
+          <ul>
+            <li><a href="https://github.com/jacksitlab/libre-moto/blob/main/LICENSE" target="_blank" rel="noopener" data-i18n="footer-license">Lizenz (GPLv3)</a></li>
+          </ul>
+        </div>
+      </div>
+      <p class="footer-note mt-4 mb-0" data-i18n="footer-note">LibreMoto ist freie Software (GPLv3). „Beeline“ und „Beeline Moto II“ sind Marken ihrer jeweiligen Eigentümer; LibreMoto ist ein unabhängiges Projekt und steht in keiner Verbindung zu Beeline.</p>
+    </div>
+  </footer>
+
+  <script src="vendor/bootstrap/bootstrap.bundle.min.js"></script>
+  <script src="js/i18n.js"></script>
+</body>
+</html>

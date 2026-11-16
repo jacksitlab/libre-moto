@@ -1,0 +1,278 @@
+/*
+  LibreMoto website — brand layer on top of Bootstrap 5.3 (dark theme).
+  Static site: no build step, no preprocessing. Mobile-first.
+  Brand: black background, orange accent (#fe6b0b, from docs/logo.svg).
+*/
+
+:root {
+  --lm-orange: #fe6b0b;
+  --lm-orange-hover: #ff7d26;
+  --lm-ink: #eaeaea;
+  --lm-muted: #9a9a9a;
+  --lm-surface: #121212;
+  --lm-surface-2: #181818;
+  --lm-border: #2a2a2a;
+  --lm-ease: cubic-bezier(.22, .75, .25, 1);
+}
+
+/* --- Bootstrap dark variable overrides ------------------------------- */
+[data-bs-theme="dark"] {
+  --bs-body-bg: #000;
+  --bs-body-color: var(--lm-ink);
+  --bs-secondary-color: var(--lm-muted);
+  --bs-border-color: var(--lm-border);
+  --bs-link-color: var(--lm-orange);
+  --bs-link-hover-color: var(--lm-orange-hover);
+  --bs-emphasis-color: #fff;
+}
+
+html { scroll-behavior: smooth; }
+
+body {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: #000;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+main { flex: 1 0 auto; }
+
+/* --- navbar ----------------------------------------------------------- */
+.lm-navbar {
+  background: rgba(0, 0, 0, .82);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--lm-border);
+}
+.lm-navbar .brand-word { font-weight: 600; letter-spacing: .02em; font-size: 1.1rem; }
+.lm-navbar .nav-link { color: var(--lm-muted); }
+.lm-navbar .nav-link:hover,
+.lm-navbar .nav-link:focus { color: var(--lm-ink); }
+.lm-navbar .nav-link.active { color: var(--lm-orange); }
+.navbar-toggler { border-color: var(--lm-border); }
+.navbar-toggler:focus { box-shadow: 0 0 0 .2rem rgba(254, 107, 11, .25); }
+
+.lang-btn {
+  color: var(--lm-muted);
+  background: transparent;
+  border: 1px solid var(--lm-border);
+  min-width: 46px;
+}
+.lang-btn:hover { color: var(--lm-ink); border-color: #3a3a3a; }
+.lang-btn.active {
+  background: var(--lm-orange);
+  border-color: var(--lm-orange);
+  color: #000;
+  font-weight: 600;
+}
+
+/* --- buttons ----------------------------------------------------------- */
+.btn-lm-orange {
+  --bs-btn-bg: var(--lm-orange);
+  --bs-btn-color: #000;
+  --bs-btn-border-color: var(--lm-orange);
+  --bs-btn-hover-bg: var(--lm-orange-hover);
+  --bs-btn-hover-color: #000;
+  --bs-btn-hover-border-color: var(--lm-orange-hover);
+  --bs-btn-active-bg: #e55f08;
+  --bs-btn-active-color: #000;
+  --bs-btn-active-border-color: #e55f08;
+  --bs-btn-disabled-bg: #5a3008;
+  --bs-btn-disabled-border-color: #5a3008;
+  --bs-btn-disabled-color: #caa;
+  font-weight: 600;
+}
+.btn-outline-lm {
+  --bs-btn-color: var(--lm-ink);
+  --bs-btn-border-color: #3a3a3a;
+  --bs-btn-hover-bg: var(--lm-surface-2);
+  --bs-btn-hover-color: #fff;
+  --bs-btn-hover-border-color: #4a4a4a;
+  --bs-btn-active-bg: var(--lm-surface-2);
+  --bs-btn-active-color: #fff;
+  --bs-btn-active-border-color: #4a4a4a;
+}
+
+/* --- surfaces & sections ------------------------------------------------ */
+.lm-card {
+  background: var(--lm-surface);
+  border: 1px solid var(--lm-border);
+  border-radius: .75rem;
+  height: 100%;
+}
+.lm-section { padding: 3.5rem 0; }
+.lm-section-title { font-weight: 600; margin-bottom: .5rem; }
+.lm-lead { color: var(--lm-muted); max-width: 46rem; }
+.text-lm-orange { color: var(--lm-orange) !important; }
+
+/* --- code blocks --------------------------------------------------------- */
+.lm-code {
+  background: #0a0a0a;
+  border: 1px solid var(--lm-border);
+  border-radius: .5rem;
+  padding: 1rem;
+  overflow-x: auto;
+  margin: 0;
+}
+.lm-code code { color: #d8d8d8; font-size: .85rem; }
+
+/* --- spec table ----------------------------------------------------------- */
+.lm-spec { margin: 0; }
+.lm-spec th { color: var(--lm-muted); font-weight: 500; white-space: nowrap; width: 30%; }
+.lm-spec td, .lm-spec th { border-color: var(--lm-border); }
+
+/* --- flow diagram (how the pieces connect) -------------------------------- */
+.lm-flow-arrow {
+  color: var(--lm-orange);
+  font-size: 1.6rem;
+  line-height: 1;
+  text-align: center;
+  user-select: none;
+}
+
+/* --- FAQ accordion --------------------------------------------------------- */
+.lm-accordion {
+  --bs-accordion-bg: var(--lm-surface);
+  --bs-accordion-color: var(--lm-ink);
+  --bs-accordion-btn-color: var(--lm-ink);
+  --bs-accordion-btn-bg: var(--lm-surface);
+  --bs-accordion-active-color: var(--lm-orange);
+  --bs-accordion-active-bg: var(--lm-surface-2);
+  --bs-accordion-border-color: var(--lm-border);
+  --bs-accordion-btn-focus-box-shadow: 0 0 0 .2rem rgba(254, 107, 11, .25);
+  --bs-accordion-btn-icon: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%23eaeaea'%3e%3cpath fill-rule='evenodd' d='M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z'/%3e%3c/svg%3e");
+  --bs-accordion-btn-active-icon: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%23fe6b0b'%3e%3cpath fill-rule='evenodd' d='M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z'/%3e%3c/svg%3e");
+}
+
+/* --- footer --------------------------------------------------------------- */
+.lm-footer {
+  margin-top: auto;
+  border-top: 1px solid var(--lm-border);
+  background: #050505;
+  padding: 3rem 0 2rem;
+}
+.lm-footer h2 {
+  font-size: .8rem;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--lm-muted);
+  margin-bottom: .75rem;
+}
+.lm-footer ul { list-style: none; padding: 0; margin: 0; }
+.lm-footer a { color: var(--lm-muted); text-decoration: none; }
+.lm-footer a:hover, .lm-footer a:focus { color: var(--lm-orange); }
+.footer-note { color: #6a6a6a; font-size: .8rem; }
+
+/* =========================================================================
+   Hero: animated wordmark — variant A "assembly" (see animation-demo.html).
+   Pure CSS on an inline SVG; classes "play a" are set statically in the HTML
+   so the animation starts without JavaScript. prefers-reduced-motion shows
+   the static final logo instead.
+   ========================================================================= */
+.hero { padding: 2.5rem 0 0; }
+
+.stage {
+  position: relative;
+  width: min(760px, 92vw);
+  overflow: hidden;      /* clips the sheen to the logo area */
+  isolation: isolate;    /* keep blend modes inside the stage */
+  margin: 0 auto;
+}
+.logo { display: block; width: 100%; height: auto; position: relative; z-index: 1; }
+.glow {
+  position: absolute;
+  inset: -16% -12%;
+  z-index: 0;
+  opacity: 0;
+  pointer-events: none;
+  background: radial-gradient(50% 55% at 50% 58%,
+    rgba(254, 107, 11, .32), rgba(254, 107, 11, .12) 45%, transparent 72%);
+}
+.sheen {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  mix-blend-mode: screen;
+  background: linear-gradient(100deg,
+    transparent 42%, rgba(255, 255, 255, .10) 50%, transparent 58%);
+  transform: translateX(-130%);
+}
+
+/* logo internals */
+.bg { fill: #000; }
+.word-libre path { fill: #fff; stroke: #fff; stroke-width: .4; stroke-linejoin: round; }
+.word-moto path { fill: var(--lm-orange); stroke: var(--lm-orange); stroke-width: .4; stroke-linejoin: round; }
+.needle, .sw-mid, .sw-left2, .speedline {
+  fill: var(--lm-orange); stroke: var(--lm-orange); stroke-width: .1; stroke-linejoin: bevel;
+}
+.sw-main, .sw-left { fill: #fff; stroke: #fff; stroke-width: .1; stroke-linejoin: bevel; }
+
+svg path, svg g { transform-box: fill-box; }
+.needle { transform-origin: 92% 96%; }   /* pivot at the crescent's base */
+.logo-all { transform-origin: 50% 60%; } /* visual center, on the wordmark */
+
+/* idle loop after the intro */
+.stage.play .glow {
+  animation: glowIn 1.2s ease-out 2.2s both, glowPulse 5s ease-in-out 3.4s infinite;
+}
+.stage.play .sheen { animation: sheenSweep 6.5s ease-in-out 3.4s infinite; }
+.stage.play .needle { animation: var(--ni, none), sway 5s ease-in-out 3s infinite; }
+.stage.play .speedline { animation: var(--si, none), flick 7s ease-in-out 4.2s infinite; }
+
+/* variant A: assembly — letters stagger in, swooshes fly in, needle settles */
+.stage.play.a .ch { animation: chIn .5s var(--lm-ease) var(--d, 0s) both; }
+.stage.play.a .l-l   { --d: .06s }
+.stage.play.a .l-i   { --d: .14s }
+.stage.play.a .l-b   { --d: .22s }
+.stage.play.a .l-r   { --d: .30s }
+.stage.play.a .l-e   { --d: .38s }
+.stage.play.a .m-m   { --d: .52s }
+.stage.play.a .m-o1  { --d: .60s }
+.stage.play.a .m-t   { --d: .68s }
+.stage.play.a .m-o2  { --d: .76s }
+.stage.play.a .l-dot { animation: dotIn .5s var(--lm-ease) .5s both; }
+.stage.play.a {
+  --ni: settle .75s var(--lm-ease) 1.25s both;
+  --si: streakIn .45s var(--lm-ease) .85s both;
+}
+.stage.play.a .sw-left  { animation: fromLeft .6s ease-out .85s both; }
+.stage.play.a .sw-left2 { animation: fromLeft .6s ease-out .95s both; }
+.stage.play.a .sw-main   { animation: fromLeft .75s ease-out 1.05s both; }
+.stage.play.a .sw-mid    { animation: fromRight .6s ease-out 1.15s both; }
+
+@keyframes chIn { from { opacity: 0; transform: translateY(8px); } }
+@keyframes dotIn {
+  0% { opacity: 0; transform: translateY(-8px); }
+  60% { opacity: 1; transform: translateY(1.2px); }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes fromLeft  { from { opacity: 0; transform: translateX(-18px); } }
+@keyframes fromRight { from { opacity: 0; transform: translateX(18px); } }
+@keyframes streakIn  { from { opacity: 0; transform: translateX(28px); } }
+@keyframes settle { from { opacity: 0; transform: rotate(-12deg); } }
+@keyframes glowIn { from { opacity: 0; transform: scale(.8); } to { opacity: .7; transform: none; } }
+@keyframes glowPulse {
+  0%, 100% { opacity: .7; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.05); }
+}
+@keyframes sheenSweep {
+  0% { transform: translateX(-130%); }
+  15%, 100% { transform: translateX(230%); }
+}
+@keyframes sway { 0%, 100% { transform: rotate(0deg); } 50% { transform: rotate(1.5deg); } }
+@keyframes flick {
+  0%, 90% { opacity: 1; transform: translateX(0); }
+  92.5% { opacity: 0; transform: translateX(16px); }
+  94% { opacity: 0; transform: translateX(-16px); }
+  96.5%, 100% { opacity: 1; transform: translateX(0); }
+}
+
+/* accessibility: no animation — show the final static logo */
+@media (prefers-reduced-motion: reduce) {
+  .stage *, .stage *::before, .stage *::after { animation: none !important; }
+  .glow { opacity: .55; }
+  .sheen { display: none; }
+}
