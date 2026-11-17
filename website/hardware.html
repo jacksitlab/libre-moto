@@ -4,10 +4,77 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title data-i18n="hw-title">Hardware — LibreMoto</title>
-  <meta name="description" content="LibreMoto hardware: ESP32-S3, round 2.1&quot; 480×480 touch display, BLE, USB-C power. Open hardware, HAL-based board support.">
+  <meta name="description" content="LibreMoto hardware: ESP32-S3, round touch displays, BLE, USB-C power. Open hardware, HAL-based board support.">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link href="vendor/bootstrap/bootstrap.min.css" rel="stylesheet">
   <link href="css/site.css" rel="stylesheet">
+  <style>
+    .board-selector {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+    .board-btn {
+      text-align: left;
+      padding: 1.25rem;
+      border: 1px solid var(--lm-border);
+      border-radius: 0.75rem;
+      background: var(--lm-surface);
+      color: var(--lm-ink);
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .board-btn:hover {
+      border-color: #3a3a3a;
+      background: var(--lm-surface-2);
+    }
+    .board-btn.active {
+      border-color: var(--lm-orange);
+      background: rgba(254, 107, 11, 0.08);
+    }
+    .board-btn .board-name {
+      font-weight: 600;
+      font-size: 1.1rem;
+      margin-bottom: 0.25rem;
+    }
+    .board-btn .board-tagline {
+      color: var(--lm-muted);
+      font-size: 0.85rem;
+    }
+    .board-btn.active .board-name {
+      color: var(--lm-orange);
+    }
+    .spec-panel {
+      transition: opacity 0.2s ease;
+    }
+    .spec-panel.fading {
+      opacity: 0.5;
+    }
+    .status-badge {
+      display: inline-block;
+      padding: 0.2rem 0.6rem;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .status-reference {
+      background: rgba(254, 107, 11, 0.15);
+      color: var(--lm-orange);
+    }
+    .status-progress {
+      background: rgba(154, 154, 154, 0.15);
+      color: var(--lm-muted);
+    }
+    @media (min-width: 992px) {
+      .board-selector {
+        position: sticky;
+        top: 100px;
+        align-self: flex-start;
+      }
+    }
+  </style>
 </head>
 <body>
   <a class="visually-hidden-focusable" href="#content" data-i18n="skip-content">Zum Inhalt springen</a>
@@ -47,41 +114,43 @@
       <p class="lm-lead mb-4" data-i18n="hw-lead">Bewusst einfache, offene Hardware: ein ESP32-S3, ein rundes Touchdisplay, sonst nichts. Kein geschlossenes Modul, kein Vendor-Lock-in.</p>
 
       <div class="row g-4">
-        <div class="col-12 col-lg-6">
-          <div class="lm-card p-4 h-100">
-            <h2 class="h5 fw-semibold mb-3" data-i18n="hw-spec-title">Technische Daten (CrowPanel 2,1″)</h2>
-            <table class="table lm-spec">
+        <!-- Left: Specs panel -->
+        <div class="col-12 col-lg-8">
+          <div class="lm-card p-4 spec-panel" id="spec-panel">
+            <div class="d-flex align-items-center justify-content-between mb-3">
+              <h2 class="h5 fw-semibold mb-0" id="spec-title">Technische Daten</h2>
+              <span class="status-badge status-reference" id="spec-status">Referenz-Board</span>
+            </div>
+            <table class="table lm-spec" id="spec-table">
               <tbody>
-                <tr><th scope="row" data-i18n="hw-spec-mcu">Mikrocontroller</th><td data-i18n="hw-spec-mcu-v">ESP32-S3R8 — dual-core Xtensa LX7, 240 MHz, 512 KB SRAM, 8 MB PSRAM, 16 MB Flash</td></tr>
-                <tr><th scope="row" data-i18n="hw-spec-display">Display</th><td data-i18n="hw-spec-display-v">2,1″ IPS, 480×480 px, rund, RGB-parallel, ST7701S-Treiber, ~460 Nits</td></tr>
-                <tr><th scope="row" data-i18n="hw-spec-touch">Eingabe</th><td data-i18n="hw-spec-touch-v">CST816-Touch über I²C — Tippen, Halten, Wischen (kein Drehgeber)</td></tr>
-                <tr><th scope="row" data-i18n="hw-spec-io">I/O-Expander</th><td data-i18n="hw-spec-io-v">PCF8574 (I²C) für Reset-, IRQ- und LCD-Power-Signale</td></tr>
-                <tr><th scope="row" data-i18n="hw-spec-power">Stromversorgung</th><td data-i18n="hw-spec-power-v">5 V über USB-C</td></tr>
-                <tr><th scope="row" data-i18n="hw-spec-link">Anbindung</th><td data-i18n="hw-spec-link-v">Bluetooth Low Energy (GATT-Server)</td></tr>
+                <tr><th scope="row" data-i18n="hw-spec-mcu">Mikrocontroller</th><td id="spec-mcu"></td></tr>
+                <tr><th scope="row" data-i18n="hw-spec-display">Display</th><td id="spec-display"></td></tr>
+                <tr><th scope="row" data-i18n="hw-spec-touch">Eingabe</th><td id="spec-touch"></td></tr>
+                <tr><th scope="row" data-i18n="hw-spec-extra">Besonderheiten</th><td id="spec-extra"></td></tr>
+                <tr><th scope="row" data-i18n="hw-spec-power">Stromversorgung</th><td id="spec-power"></td></tr>
+                <tr><th scope="row" data-i18n="hw-spec-link">Anbindung</th><td id="spec-link"></td></tr>
+                <tr><th scope="row" data-i18n="hw-spec-size">Abmessungen</th><td id="spec-size"></td></tr>
               </tbody>
             </table>
           </div>
         </div>
 
-        <div class="col-12 col-lg-6">
-          <div class="lm-card p-4 h-100">
-            <h2 class="h5 fw-semibold mb-3" data-i18n="hw-boards-title">Boards</h2>
-            <p class="text-secondary small mb-3" data-i18n="hw-boards-text">Die Firmware hat eine Hardware-Abstraktionsschicht (HAL) — pro Board ein Treibersatz, ausgewählt beim Build. Aktuell unterstützt:</p>
-            <div class="d-flex flex-column gap-3">
-              <div>
-                <h3 class="h6 fw-semibold mb-1">CrowPanel 2,1″</h3>
-                <p class="text-secondary small mb-0" data-i18n="hw-board-crowpanel">Elecrow CrowPanel 2,1″ — ESP32-S3, ST7701S 480×480, CST816-Touch. Das Referenz-Board des Projekts.</p>
-              </div>
-              <div>
-                <h3 class="h6 fw-semibold mb-1">Waveshare AMOLED 1.75C</h3>
-                <p class="text-secondary small mb-0" data-i18n="hw-board-waveshare">Waveshare ESP32-S3-Touch-AMOLED-1.75C — 466×466 AMOLED über QSPI. Board-Support in Arbeit.</p>
-              </div>
-            </div>
-            <hr class="border-secondary-subtle">
-            <p class="text-secondary small mb-0" data-i18n="hw-boards-own">Eigenes Board? Die HAL-Schnittstelle ist klein: Display, Touch, Power — der Rest (Protokoll, Renderer, UI) wird geteilt.</p>
+        <!-- Right: Board selector -->
+        <div class="col-12 col-lg-4">
+          <div class="board-selector">
+            <button class="board-btn active" data-board="crowpanel" onclick="selectBoard('crowpanel')">
+              <div class="board-name">CrowPanel 2,1″</div>
+              <div class="board-tagline">Elecrow · Referenz-Board</div>
+            </button>
+            <button class="board-btn" data-board="waveshare" onclick="selectBoard('waveshare')">
+              <div class="board-name">Waveshare AMOLED 1.75C</div>
+              <div class="board-tagline">AMOLED · In Arbeit</div>
+            </button>
           </div>
         </div>
+      </div>
 
+      <div class="row g-4 mt-2">
         <div class="col-12">
           <div class="lm-card p-4">
             <h2 class="h5 fw-semibold mb-2" data-i18n="hw-mount-title">Montage & Strom</h2>
@@ -124,5 +193,90 @@
 
   <script src="vendor/bootstrap/bootstrap.bundle.min.js"></script>
   <script src="js/i18n.js"></script>
+  <script>
+    const boardSpecs = {
+      crowpanel: {
+        title: { de: "Technische Daten (CrowPanel 2,1″)", en: "Specs (CrowPanel 2.1″)" },
+        status: { de: "Referenz-Board", en: "Reference board" },
+        statusClass: "status-reference",
+        mcu: { de: "ESP32-S3R8 — dual-core Xtensa LX7, 240 MHz, 512 KB SRAM, 8 MB PSRAM, 16 MB Flash", en: "ESP32-S3R8 — dual-core Xtensa LX7, 240 MHz, 512 KB SRAM, 8 MB PSRAM, 16 MB flash" },
+        display: { de: "2,1″ IPS, 480×480 px, rund, RGB-parallel, ST7701S-Treiber, ~460 Nits", en: "2.1″ IPS, 480×480 px, round, RGB parallel, ST7701S driver, ~460 nits" },
+        touch: { de: "CST816-Touch über I²C — Tippen, Halten, Wischen (kein Drehgeber)", en: "CST816 touch over I²C — tap, hold, swipe (no rotary knob)" },
+        extra: { de: "PCF8574 I/O-Expander (I²C) für Reset-, IRQ- und LCD-Power-Signale", en: "PCF8574 I/O expander (I²C) for reset, IRQ and LCD power signals" },
+        power: { de: "5 V über USB-C", en: "5 V via USB-C" },
+        link: { de: "Bluetooth Low Energy (GATT-Server)", en: "Bluetooth Low Energy (GATT server)" },
+        size: { de: "79 × 79 × 30 mm, ~80 g", en: "79 × 79 × 30 mm, ~80 g" }
+      },
+      waveshare: {
+        title: { de: "Technische Daten (Waveshare AMOLED 1.75C)", en: "Specs (Waveshare AMOLED 1.75C)" },
+        status: { de: "In Arbeit", en: "In progress" },
+        statusClass: "status-progress",
+        mcu: { de: "ESP32-S3R8 — dual-core Xtensa LX7, 240 MHz, 512 KB SRAM, 8 MB PSRAM, 32 MB Flash", en: "ESP32-S3R8 — dual-core Xtensa LX7, 240 MHz, 512 KB SRAM, 8 MB PSRAM, 32 MB flash" },
+        display: { de: "1,75″ AMOLED, 466×466 px, rund, QSPI, CO5300-Treiber, 700 Nits, 16,7 Mio. Farben", en: "1.75″ AMOLED, 466×466 px, round, QSPI, CO5300 driver, 700 nits, 16.7M colors" },
+        touch: { de: "CST9217-Touch über I²C — Tippen, Halten, Wischen", en: "CST9217 touch over I²C — tap, hold, swipe" },
+        extra: { de: "Dual-Mikrofone, Lautsprecher, ES8311 Audio-Codec, QMI8658 IMU, AXP2101 Power-Management, optionale LiPo-Batterie", en: "Dual microphones, speaker, ES8311 audio codec, QMI8658 IMU, AXP2101 power management, optional LiPo battery" },
+        power: { de: "5 V über USB-C, optional 3,7 V LiPo-Batterie", en: "5 V via USB-C, optional 3.7 V LiPo battery" },
+        link: { de: "Bluetooth Low Energy (GATT-Server), Wi-Fi", en: "Bluetooth Low Energy (GATT server), Wi-Fi" },
+        size: { de: "Badge-Style Aluminium-Gehäuse", en: "Badge-style aluminum case" }
+      }
+    };
+
+    let currentLang = "de";
+
+    function getLang() {
+      try {
+        const saved = localStorage.getItem("lm-lang");
+        if (saved === "de" || saved === "en") return saved;
+      } catch (e) {}
+      const nav = (navigator.language || "de").toLowerCase();
+      return nav.indexOf("de") === 0 ? "de" : "en";
+    }
+
+    function selectBoard(boardId) {
+      const specs = boardSpecs[boardId];
+      if (!specs) return;
+
+      currentLang = getLang();
+
+      // Update active state on buttons
+      document.querySelectorAll(".board-btn").forEach(btn => {
+        btn.classList.toggle("active", btn.dataset.board === boardId);
+      });
+
+      // Fade out, update, fade in
+      const panel = document.getElementById("spec-panel");
+      panel.classList.add("fading");
+
+      setTimeout(() => {
+        document.getElementById("spec-title").textContent = specs.title[currentLang];
+
+        const statusEl = document.getElementById("spec-status");
+        statusEl.textContent = specs.status[currentLang];
+        statusEl.className = "status-badge " + specs.statusClass;
+
+        document.getElementById("spec-mcu").textContent = specs.mcu[currentLang];
+        document.getElementById("spec-display").textContent = specs.display[currentLang];
+        document.getElementById("spec-touch").textContent = specs.touch[currentLang];
+        document.getElementById("spec-extra").textContent = specs.extra[currentLang];
+        document.getElementById("spec-power").textContent = specs.power[currentLang];
+        document.getElementById("spec-link").textContent = specs.link[currentLang];
+        document.getElementById("spec-size").textContent = specs.size[currentLang];
+
+        panel.classList.remove("fading");
+      }, 150);
+    }
+
+    // Listen for language changes
+    document.addEventListener("lm-lang-changed", function(e) {
+      currentLang = e.detail;
+      const activeBtn = document.querySelector(".board-btn.active");
+      if (activeBtn) {
+        selectBoard(activeBtn.dataset.board);
+      }
+    });
+
+    // Initialize with CrowPanel
+    selectBoard("crowpanel");
+  </script>
 </body>
 </html>

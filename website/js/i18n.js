@@ -158,6 +158,8 @@
     "hw-spec-power-v": { de: "5 V über USB-C", en: "5 V via USB-C" },
     "hw-spec-link": { de: "Anbindung", en: "Connectivity" },
     "hw-spec-link-v": { de: "Bluetooth Low Energy (GATT-Server)", en: "Bluetooth Low Energy (GATT server)" },
+    "hw-spec-extra": { de: "Besonderheiten", en: "Features" },
+    "hw-spec-size": { de: "Abmessungen", en: "Dimensions" },
     "hw-boards-title": { de: "Boards", en: "Boards" },
     "hw-boards-text": {
       de: "Die Firmware hat eine Hardware-Abstraktionsschicht (HAL) — pro Board ein Treibersatz, ausgewählt beim Build. Aktuell unterstützt:",
