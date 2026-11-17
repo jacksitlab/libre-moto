@@ -28,7 +28,7 @@
         android:layout_marginStart="12dp"
         android:minWidth="90dp"
         android:gravity="center"
-        android:text="—"
+        android:text="@string/status_unknown"
         android:textSize="12sp" />
 
     <TextView

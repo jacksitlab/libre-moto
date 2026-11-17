@@ -17,6 +17,8 @@ import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothManager
 import android.content.Context
+import android.content.res.Resources
+import de.jacksitlab.libremoto.R
 import java.util.UUID
 
 object Uuid {
@@ -58,7 +60,7 @@ private const val MAP_GAP_MS = 30L
  * keeps a 10 ms margin and drains a 4-chunk frame in ~100 ms. */
 private const val TX_PACE_MS = 25L
 
-class BleController(private val context: Context, log: (String) -> Unit) {
+class BleController(private val context: Context, private val res: Resources, log: (String) -> Unit) {
     /** Log line sink (UI-free, test-friendly). In the app this sink is wired to
      *  MainActivity.log, which mirrors every line to logcat (tag "LibreMoto"),
      *  so `adb logcat -s LibreMoto` shows the full BLE traffic (payloads included). */
@@ -129,7 +131,7 @@ class BleController(private val context: Context, log: (String) -> Unit) {
 
     /** Thread-safe: queues a raw payload and pumps if idle. */
     private fun enqueue(data: ByteArray) {
-        if (!Tx.active) { log("tx: dropped (not connected)"); return }
+        if (!Tx.active) { log(res.getString(R.string.log_tx_dropped)); return }
         Tx.queue.add(data)
         pumpTx()
     }
@@ -148,7 +150,7 @@ class BleController(private val context: Context, log: (String) -> Unit) {
      *  original code used when frames DID flow. */
     @Synchronized
     private fun pumpTx() {
-        if (!Tx.active) { clearTx("inaktiv"); return }
+        if (!Tx.active) { clearTx("inactive"); return }
         while (true) {
             if (Tx.busy) {
                 val since = System.currentTimeMillis() - Tx.busySinceMs
@@ -177,19 +179,19 @@ class BleController(private val context: Context, log: (String) -> Unit) {
                         lastDrainMs = drain
                         if (++drainStat >= 10) {
                             drainStat = 0
-                            log("map drain: ${drainMsAvg / 10} ms avg per frame (${"%.1f".format(1000.0 / (drainMsAvg / 10.0))} fps max)")
+                            log(res.getString(R.string.log_map_drain, drainMsAvg / 10, "%.1f".format(1000.0 / (drainMsAvg / 10.0))))
                             drainMsAvg = 0
                         }
                         drainMsAvg += drain.toInt()
                     }
                 }
                 else -> {
-                    val g = gatt.get() ?: run { clearTx("gatt weg"); return }
+                    val g = gatt.get() ?: run { clearTx("gatt lost"); return }
                     val c = when (data[0].toInt() and 0xFF) {
                         CH_NAV -> chNav
                         CH_MAP -> chMap
                         else -> chCtl
-                    } ?: run { clearTx("channel weg"); return }
+                    } ?: run { clearTx("channel lost"); return }
                     Tx.queue.poll()   // CONSUME the head — peek() alone made the
                                       // TX thread rewrite the same item forever
                     Tx.busy = true
@@ -212,10 +214,10 @@ class BleController(private val context: Context, log: (String) -> Unit) {
                              * the normal auto-reconnect rebuilds it. */
                             Tx.rejects++
                             if (Tx.rejects >= 5) {
-                                log("tx: ${Tx.rejects}x rejected — GATT wedged, rebuilding connection")
+                                log(res.getString(R.string.log_tx_wedged, Tx.rejects))
                                 recoverWedgedGatt(g)
                             } else {
-                                log("tx: writeCharacteristic rejected — chunk dropped")
+                                log(res.getString(R.string.log_tx_rejected))
                             }
                             return
                         }
@@ -225,10 +227,10 @@ class BleController(private val context: Context, log: (String) -> Unit) {
                         }
                     } catch (e: SecurityException) {
                         Tx.busy = false
-                        log("tx: missing permission")
+                        log(res.getString(R.string.log_tx_no_perm))
                     } catch (e: Exception) {
                         Tx.busy = false
-                        log("tx: ${e.javaClass.simpleName}: ${e.message}")
+                        log(res.getString(R.string.log_tx_error, e.javaClass.simpleName, e.message ?: ""))
                     }
                     return   // slot busy; timer or callback releases it
                 }
@@ -240,7 +242,7 @@ class BleController(private val context: Context, log: (String) -> Unit) {
      *  deliver callbacks get bonus throughput; those that don't rely on
      *  the TX_PACE_MS timer and lose nothing). */
     private fun onWriteDone(ok: Boolean) {
-        if (!ok) log("tx: write status != 0")
+        if (!ok) log(res.getString(R.string.log_tx_error, "write status != 0", ""))
         if (Tx.busy) {
             Tx.writeCbs++
             Tx.busy = false
@@ -250,7 +252,7 @@ class BleController(private val context: Context, log: (String) -> Unit) {
 
     /** Diagnostics for the log: how writes were released. */
     fun txStats(): String =
-        "tx: cbs=${Tx.writeCbs} paced=${Tx.pacedWrites} queue=${Tx.queue.size}"
+        res.getString(R.string.log_tx_stats, Tx.writeCbs, Tx.pacedWrites, Tx.queue.size)
 
     /** Drops everything queued (disconnect, missing channels). */
     private fun clearTx(reason: String) {
@@ -258,7 +260,7 @@ class BleController(private val context: Context, log: (String) -> Unit) {
         Tx.queue.clear()
         Tx.busy = false
         Tx.rejects = 0
-        if (n > 0) log("tx: $n entries dropped ($reason)")
+        if (n > 0) log(res.getString(R.string.log_tx_dropped_n, n, reason))
     }
 
     /** Recover a wedged ATT pipeline: the stack refuses every
@@ -269,17 +271,17 @@ class BleController(private val context: Context, log: (String) -> Unit) {
     @SuppressLint("MissingPermission")
     private fun recoverWedgedGatt(g: android.bluetooth.BluetoothGatt) {
         Tx.active = false
-        clearTx("GATT verkeilt")
+        clearTx("GATT wedged")
         try { g.disconnect() } catch (_: Exception) {}
         // close() happens in onConnectionStateChange(STATE_DISCONNECTED)
     }
 
 
     fun adapterState(): String = when {
-        bt == null -> "BLE: unavailable"
-        adapter == null -> "BLE: adapter missing"
-        !adapter!!.isEnabled -> "BLE: switched off"
-        else -> "BLE: ready"
+        bt == null -> res.getString(R.string.log_ble_unavailable)
+        adapter == null -> res.getString(R.string.log_ble_adapter_missing)
+        !adapter!!.isEnabled -> res.getString(R.string.log_ble_off)
+        else -> res.getString(R.string.log_ble_ready)
     }
 
     @SuppressLint("MissingPermission")
@@ -293,8 +295,8 @@ class BleController(private val context: Context, log: (String) -> Unit) {
                 android.bluetooth.BluetoothProfile.STATE_DISCONNECTED -> {
                     connected = false
                     onConnectionChanged?.invoke(false)
-                    clearTx("Verbindung getrennt")
-                    log("disconnected (status=$status)")
+                    clearTx("connection closed")
+                    log(res.getString(R.string.log_disconnected_status, status))
                     g.close()
                 }
             }
@@ -308,7 +310,7 @@ class BleController(private val context: Context, log: (String) -> Unit) {
             if (status == 0) {
                 this@BleController.mtu = mtu
                 mapChunk = (mtu - 3).coerceAtLeast(20)
-                log("MTU=$mtu, MapChunk=$mapChunk")
+                log(res.getString(R.string.log_mtu, mtu, mapChunk))
             }
             // small settle then discover (some stacks need a beat after MTU)
             android.os.Handler(android.os.Looper.getMainLooper())
@@ -316,12 +318,12 @@ class BleController(private val context: Context, log: (String) -> Unit) {
         }
 
         private fun discover(g: android.bluetooth.BluetoothGatt) {
-            try { g.discoverServices() } catch (e: SecurityException) { log("BLE: no service-discovery perm") }
+            try { g.discoverServices() } catch (e: SecurityException) { log(res.getString(R.string.log_ble_no_svc_perm)) }
         }
 
         override fun onServicesDiscovered(g: android.bluetooth.BluetoothGatt, status: Int) {
             val svc = g.getService(Uuid.SVC)
-            if (svc == null) { log("BLE: service ${Uuid.SVC} not found"); return }
+            if (svc == null) { log(res.getString(R.string.log_ble_svc_not_found, Uuid.SVC)); return }
             chNav = svc.getCharacteristic(Uuid.NAV)
             chSts = svc.getCharacteristic(Uuid.STS)
             chMap = svc.getCharacteristic(Uuid.MAP)
@@ -331,12 +333,9 @@ class BleController(private val context: Context, log: (String) -> Unit) {
             if (mtu < 100) {
                 // MTU negotiation failed earlier — map chunks stay small (20 B)
                 // and a NavData JSON may not fit. Log loudly once.
-                log("BLE: MTU only $mtu — NavData may exceed ${mtu - 3} B (stuttering!)")
+                log(res.getString(R.string.log_ble_mtu_low, mtu, mtu - 3))
             }
-            log("Service ready — chars: nav=" + (chNav != null) +
-                " sts=" + (chSts != null) +
-                " map=" + (chMap != null) +
-                " ctl=" + (chCtl != null))
+            log(res.getString(R.string.log_service_ready, (chNav != null), (chSts != null), (chMap != null), (chCtl != null)))
             subscribeStatus(g)
             readStatusOnce(g)
             Tx.active = true
@@ -357,20 +356,20 @@ class BleController(private val context: Context, log: (String) -> Unit) {
                     g.writeDescriptor(d)
                 }
                 log("Status-Notify abonniert")
-            } catch (e: Exception) { log("status notify failed: $e") }
+            } catch (e: Exception) { log(res.getString(R.string.log_status_notify_failed, e)) }
         }
 
         override fun onCharacteristicRead(g: android.bluetooth.BluetoothGatt, c: android.bluetooth.BluetoothGattCharacteristic, status: Int) {
-            if (c.uuid == Uuid.STS) c.value?.let { log("status read: " + HexUtil.decode(it)) }
+            if (c.uuid == Uuid.STS) c.value?.let { log(res.getString(R.string.log_status_read, HexUtil.decode(it))) }
         }
 
         override fun onCharacteristicWrite(g: android.bluetooth.BluetoothGatt, c: android.bluetooth.BluetoothGattCharacteristic, status: Int) {
-            if (status != 0) log("Write " + c.uuid.toString().lowercase() + " status=$status ⚠")
+            if (status != 0) log(res.getString(R.string.log_write_status, c.uuid.toString().lowercase(), status))
             onWriteDone(status == 0)   // pump the TX queue whatever happened
         }
 
         override fun onCharacteristicChanged(g: android.bluetooth.BluetoothGatt, c: android.bluetooth.BluetoothGattCharacteristic) {
-            if (c.uuid == Uuid.STS) c.value?.let { log("Status-Notify: " + HexUtil.decode(it)) }
+            if (c.uuid == Uuid.STS) c.value?.let { log(res.getString(R.string.log_status_notify, HexUtil.decode(it))) }
         }
     }
     // ---- scans -----------------------------------------------------
@@ -392,8 +391,8 @@ class BleController(private val context: Context, log: (String) -> Unit) {
     @SuppressLint("MissingPermission")
     fun startScan(onFound: (name: String, address: String) -> Unit) {
         val a = adapter
-        if (a == null) { log("BLE: kein Adapter"); return }
-        if (!a.isEnabled) { log("BLE: erst einschalten"); return }
+        if (a == null) { log(res.getString(R.string.log_ble_no_adapter)); return }
+        if (!a.isEnabled) { log(res.getString(R.string.log_ble_turn_on)); return }
         stopScan()   // never two scans at once
         try {
             val cb = object : android.bluetooth.le.ScanCallback() {
@@ -407,19 +406,19 @@ class BleController(private val context: Context, log: (String) -> Unit) {
             }
             activeScan = cb
             a.bluetoothLeScanner.startScan(cb)
-            log("scanning: \"${Uuid.NAME}\" …")
+            log(res.getString(R.string.log_scanning, Uuid.NAME))
         } catch (e: SecurityException) {
-            log("BLE: missing permission (BLUETOOTH_SCAN/CONNECT)")
+            log(res.getString(R.string.log_ble_scan_perm))
         }
     }
 
     @SuppressLint("MissingPermission")
     fun connect(address: String) {
         val a = adapter
-        if (a == null) { log("BLE: kein Adapter"); return }
-        if (!a.isEnabled) { log("BLE: aus"); return }
+        if (a == null) { log(res.getString(R.string.log_ble_no_adapter)); return }
+        if (!a.isEnabled) { log(res.getString(R.string.log_ble_off)); return }
         val dev = a.getRemoteDevice(address)
-        log("connecting: " + address)
+        log(res.getString(R.string.log_connecting, address))
         val g = dev.connectGatt(context, false, gattCb, BluetoothDevice.TRANSPORT_LE)
         gatt.set(g)
     }
@@ -429,9 +428,9 @@ class BleController(private val context: Context, log: (String) -> Unit) {
     /** Reads current Status (F003) — protocol §3. */
     @SuppressLint("MissingPermission")
     fun readStatus() {
-        val c = chSts ?: return log("status: channel missing")
+        val c = chSts ?: return log(res.getString(R.string.log_status_ch_missing))
         val g = gatt.get() ?: return
-        try { g.readCharacteristic(c) } catch (e: SecurityException) { log("BLE: no read perm") }
+        try { g.readCharacteristic(c) } catch (e: SecurityException) { log(res.getString(R.string.log_ble_read_perm)) }
     }
 
     // ---- writes ----------------------------------------------------
@@ -444,10 +443,10 @@ class BleController(private val context: Context, log: (String) -> Unit) {
         val payload = json.toByteArray(Charsets.UTF_8)
         if (payload.size > mtu - 3) {
             // Would be rejected by the stack anyway; drop instead of stalling the queue.
-            log("nav: dropped (${payload.size}B > MTU ${mtu - 3}B — check MTU negotiation)")
+            log(res.getString(R.string.log_nav_dropped, payload.size, mtu - 3))
             return
         }
-        log("TX nav  (${payload.size}B): $json")
+        log(res.getString(R.string.log_tx_nav, payload.size, json))
         enqueue(byteArrayOf(CH_NAV.toByte()) + payload)
     }
 
@@ -455,10 +454,10 @@ class BleController(private val context: Context, log: (String) -> Unit) {
     fun sendControl(json: String) {
         val payload = json.toByteArray(Charsets.UTF_8)
         if (payload.size > mtu - 3) {
-            log("ctl: dropped (${payload.size}B > MTU ${mtu - 3}B)")
+            log(res.getString(R.string.log_ctl_dropped, payload.size, mtu - 3))
             return
         }
-        log("TX ctl  (${payload.size}B): $json")
+        log(res.getString(R.string.log_tx_ctl, payload.size, json))
         enqueue(byteArrayOf(CH_CTL.toByte()) + payload)
     }
 
@@ -468,7 +467,7 @@ class BleController(private val context: Context, log: (String) -> Unit) {
      *  characteristic, or the firmware reassembly desynchronizes. */
     @SuppressLint("MissingPermission")
     fun sendMap(frame: ByteArray) {
-        val c = chMap ?: return log("map: channel missing")
+        val c = chMap ?: return log(res.getString(R.string.log_map_ch_missing))
         val chunk = mapChunk
         // Header (11 B) + segments must not exceed the protocol frame budget;
         // encoding already guarantees ≤ MAX_FRAME (4096 B).
@@ -490,7 +489,7 @@ class BleController(private val context: Context, log: (String) -> Unit) {
             droppedMapsWindow++
             val now = System.currentTimeMillis()
             if (now - lastMapDropLog > 5000) {
-                log("map: skipped (previous frame still in flight, total $droppedMaps) — link paces itself")
+                log(res.getString(R.string.log_map_skipped, droppedMaps))
                 lastMapDropLog = now
             }
             return
@@ -502,14 +501,14 @@ class BleController(private val context: Context, log: (String) -> Unit) {
         if (now2 - lastMapRateLog >= 10000) {
             if (lastMapRateLog > 0) {
                 val dt = (now2 - lastMapRateLog) / 1000.0
-                log("map: ${"%.1f".format(sentMapsWindow / dt)} fps sent, $droppedMapsWindow skipped (10 s window)")
+                log(res.getString(R.string.log_map_rate, "%.1f".format(sentMapsWindow / dt), droppedMapsWindow))
             }
             lastMapRateLog = now2
             sentMapsWindow = 0
             droppedMapsWindow = 0
         }
         sentMapsWindow++
-        log("TX map  (${frame.size}B, $n Chunks)")
+        log(res.getString(R.string.log_tx_map, frame.size, n))
         // Precompute magic-safe chunk boundaries: no continuation chunk may
         // start with 4C 4D 01 (would falsely close the frame at the firmware —
         // sender contract, map_reassembly.h).
@@ -545,7 +544,7 @@ class BleController(private val context: Context, log: (String) -> Unit) {
         }
         gatt.set(null)
         connected = false
-        log("disconnected (user)")
+        log(res.getString(R.string.log_disconnected))
     }
 }
 

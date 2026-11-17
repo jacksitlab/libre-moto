@@ -54,7 +54,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:paddingBottom="6dp"
-                    android:text="Kontinente"
+                    android:text="@string/continents"
                     android:textSize="12sp"
                     android:textStyle="bold" />
 
@@ -78,7 +78,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:paddingBottom="6dp"
-                    android:text="Antippen zum Löschen"
+                    android:text="@string/installed_hint_none"
                     android:textSize="12sp" />
 
                 <ListView

@@ -41,9 +41,9 @@ class MapsActivity : Activity() {
 
         val tabs = findViewById<TabHost>(android.R.id.tabhost)
         tabs.setup()
-        tabs.addTab(tabs.newTabSpec("avail").setIndicator("Available")
+        tabs.addTab(tabs.newTabSpec("avail").setIndicator(getString(R.string.tab_available))
             .setContent(R.id.tab_available))
-        tabs.addTab(tabs.newTabSpec("inst").setIndicator("Installiert")
+        tabs.addTab(tabs.newTabSpec("inst").setIndicator(getString(R.string.tab_installed))
             .setContent(R.id.tab_installed))
 
         availableList = findViewById(R.id.available_list)
@@ -83,10 +83,10 @@ class MapsActivity : Activity() {
 
     private fun refresh() {
         if (mapManager.regionList().isEmpty()) {
-            crumb.text = "Lade Geofabrik-Index …"
+            crumb.text = getString(R.string.index_loading)
             mapManager.fetchIndex { ok ->
                 main.post {
-                    if (ok) refresh() else crumb.text = "Index-Laden fehlgeschlagen (Netzwerk?)"
+                    if (ok) refresh() else crumb.text = getString(R.string.index_failed)
                 }
             }
         } else {
@@ -111,7 +111,7 @@ class MapsActivity : Activity() {
             path.add(0, r?.name ?: p)
             p = r?.parentId
         }
-        crumb.text = if (path.isEmpty()) "Kontinente" else path.joinToString("  ›  ")
+        crumb.text = if (path.isEmpty()) getString(R.string.continents) else path.joinToString("  ›  ")
 
         val names = children.map { r ->
             val arrow = if (mapManager.hasChildren(r.id)) "  ›" else ""
@@ -121,7 +121,7 @@ class MapsActivity : Activity() {
         availableList.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, names)
     }
 
-    // ---- Tab: installiert --------------------------------------------
+    // ---- Tab: installed --------------------------------------------
 
     private var installedIds = listOf<String>()
     /** Update state per region id: true = up to date, false = UPDATE
@@ -151,17 +151,17 @@ class MapsActivity : Activity() {
         val rows = installedIds.map { id ->
             val r = mapManager.region(id)
             val sizeMb = mapManager.regionBytes(id) / 1048576.0
-            val size = if (sizeMb >= 10.0) "%.0f MB".format(sizeMb) else "%.1f MB".format(sizeMb)
+            val size = if (sizeMb >= 10.0) getString(R.string.size_mb_large, sizeMb) else getString(R.string.size_mb_small, sizeMb)
             val (status, color) = when (updateState[id]) {
-                false -> "Update available" to 0xFFB25000.toInt()   // orange-brown
-                true -> "aktuell" to 0xFF2E7D32.toInt()             // green
-                null -> "—" to 0xFF888888.toInt()                   // grey (checking)
+                false -> getString(R.string.status_update_available) to 0xFFB25000.toInt()   // orange-brown
+                true -> getString(R.string.status_up_to_date) to 0xFF2E7D32.toInt()             // green
+                null -> getString(R.string.status_unknown) to 0xFF888888.toInt()                   // grey (checking)
             }
             InstRow(id, r?.name ?: id, status, color, size)
         }
         findViewById<TextView>(R.id.installed_hint).text =
-            if (installedIds.isEmpty()) "Noch keine Karten installiert"
-            else "Tap: update / delete"
+            if (installedIds.isEmpty()) getString(R.string.installed_hint_none)
+            else getString(R.string.installed_hint)
         installedList.adapter = object : android.widget.BaseAdapter() {
             override fun getCount() = rows.size
             override fun getItem(pos: Int) = rows[pos]
@@ -188,24 +188,24 @@ class MapsActivity : Activity() {
      *  had become hard to find when an update was shown. */
     private fun showRegionActions(region: GeofabrikRegion, updateAvailable: Boolean) {
         val actions = ArrayList<String>()
-        if (updateAvailable) actions.add("Aktualisieren (neue Kartendaten laden)")
-        actions.add("Delete")
+        if (updateAvailable) actions.add(getString(R.string.action_update))
+        actions.add(getString(R.string.action_delete))
         AlertDialog.Builder(this)
             .setTitle(region.name)
             .setItems(actions.toTypedArray()) { _, which ->
                 when (actions[which]) {
-                    "Aktualisieren (neue Kartendaten laden)" -> startDownload(region)
-                    "Delete" -> confirmDelete(region)
+                    getString(R.string.action_update) -> startDownload(region)
+                    getString(R.string.action_delete) -> confirmDelete(region)
                 }
             }
-            .setNegativeButton("Abbrechen", null)
+            .setNegativeButton(getString(R.string.btn_cancel), null)
             .show()
     }
 
     private fun startDownload(r: GeofabrikRegion) {
         progress.visibility = View.VISIBLE
         dlLabel.visibility = View.VISIBLE
-        dlLabel.text = "Lade ${r.name} …"
+        dlLabel.text = getString(R.string.download_start, r.name)
         progress.isIndeterminate = false
         mapManager.downloadRegion(r, { ok ->
             main.post {
@@ -216,11 +216,11 @@ class MapsActivity : Activity() {
         }) { phase, pct ->
             main.post {
                 if (phase == 0) {
-                    dlLabel.text = "Lade ${r.name}: $pct %"
+                    dlLabel.text = getString(R.string.download_progress, r.name, pct)
                     progress.isIndeterminate = false
                     progress.progress = pct
                 } else {
-                    dlLabel.text = "Konvertiere ${r.name} …"
+                    dlLabel.text = getString(R.string.converting, r.name)
                     progress.isIndeterminate = true
                 }
             }
@@ -230,12 +230,12 @@ class MapsActivity : Activity() {
     private fun confirmDelete(r: GeofabrikRegion) {
         AlertDialog.Builder(this)
             .setTitle(r.name)
-            .setMessage("Region is installed. Delete?")
-            .setPositiveButton("Delete") { _, _ ->
+            .setMessage(getString(R.string.confirm_delete))
+            .setPositiveButton(getString(R.string.action_delete)) { _, _ ->
                 mapManager.deleteRegion(r.id)
                 main.postDelayed({ refreshAvailable(); refreshInstalled() }, 500)
             }
-            .setNegativeButton("Abbrechen", null)
+            .setNegativeButton(getString(R.string.btn_cancel), null)
             .show()
     }
 }

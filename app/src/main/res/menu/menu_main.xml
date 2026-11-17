@@ -2,8 +2,8 @@
 <menu xmlns:android="http://schemas.android.com/apk/res/android">
     <item
         android:id="@+id/menu_maps"
-        android:title="Karten-Verwaltung" />
+        android:title="@string/menu_maps" />
     <item
         android:id="@+id/menu_log"
-        android:title="Log anzeigen/ausblenden" />
+        android:title="@string/menu_log" />
 </menu>

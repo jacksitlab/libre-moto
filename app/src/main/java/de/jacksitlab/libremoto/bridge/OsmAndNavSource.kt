@@ -4,11 +4,13 @@ import android.annotation.SuppressLint
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.res.Resources
 import android.content.ServiceConnection
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.RemoteException
+import de.jacksitlab.libremoto.R
 import de.jacksitlab.libremoto.protocol.MapFrame
 import de.jacksitlab.libremoto.protocol.NavData
 import de.jacksitlab.libremoto.protocol.NavType
@@ -44,6 +46,7 @@ import kotlin.math.atan2
  */
 class OsmAndNavSource(
     private val context: Context,
+    private val resources: Resources,
     private val log: (String) -> Unit,
 ) : NavSource {
 
@@ -179,7 +182,7 @@ class OsmAndNavSource(
                 distanceToM = d.distanceTo
                 turnType = d.turnType
                 lastDirection = d
-                log("osmAnd: in ${d.distanceTo} m → ${maneuver(d.turnType)}")
+                log(resources.getString(R.string.log_osmand_turn, d.distanceTo, maneuver(d.turnType)))
             }
         }
         override fun onContextMenuButtonClicked(buttonId: Int, pointId: String?, layerId: String?) {}
@@ -187,7 +190,7 @@ class OsmAndNavSource(
         override fun onKeyEvent(params: android.view.KeyEvent?) {}
         override fun onRouteUpdate(update: ARouteUpdate?) {
             update?.let { u ->
-                log("osmAnd: route event ${routeEventName(u.eventType)} (v=${u.routeVersion})")
+                log(resources.getString(R.string.log_osmand_route_event, routeEventName(u.eventType), u.routeVersion))
                 if (u.eventType == ARouteUpdate.ROUTE_EVENT_RECALCULATED) {
                     pullRouteGeometry()
                 } else if (u.eventType == ARouteUpdate.ROUTE_EVENT_CANCELLED ||
@@ -195,7 +198,7 @@ class OsmAndNavSource(
                     routePoints = emptyList()
                     routeVersion++
                     navActive = false
-                    log("osmAnd: route cleared")
+                    log(resources.getString(R.string.log_osmand_route_cleared))
                 }
             }
         }
@@ -205,14 +208,14 @@ class OsmAndNavSource(
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, iBinder: IBinder) {
             svc = IOsmAndAidlInterface.Stub.asInterface(iBinder)
-            log("osmAnd: service connected (V2)")
+            log(resources.getString(R.string.log_osmand_service_connected))
         }
         override fun onServiceDisconnected(name: ComponentName) {
             svc = null
             bound = false
             navCallbackId = -1L
             routeCallbackId = -1L
-            log("osmAnd: service disconnected")
+            log(resources.getString(R.string.log_osmand_service_disconnected))
         }
     }
 
@@ -231,10 +234,10 @@ class OsmAndNavSource(
     }
 
     private fun routeEventName(eventType: Int): String = when (eventType) {
-        ARouteUpdate.ROUTE_EVENT_RECALCULATED -> "RECALCULATED"
-        ARouteUpdate.ROUTE_EVENT_CANCELLED -> "CANCELLED"
-        ARouteUpdate.ROUTE_EVENT_FINISHED -> "FINISHED"
-        else -> "UNKNOWN($eventType)"
+        ARouteUpdate.ROUTE_EVENT_RECALCULATED -> resources.getString(R.string.route_event_recalculated)
+        ARouteUpdate.ROUTE_EVENT_CANCELLED -> resources.getString(R.string.route_event_cancelled)
+        ARouteUpdate.ROUTE_EVENT_FINISHED -> resources.getString(R.string.route_event_finished)
+        else -> resources.getString(R.string.route_event_unknown, eventType)
     }
 
     override val isNavigating: Boolean get() = bound && navActive
@@ -501,8 +504,7 @@ class OsmAndNavSource(
                            else dynamicScale + (if (diff > 0) 2 else -2)
             currentLookaheadM = 320.0 / (dynamicScale / 100.0)
             if (dynamicScale != lastLoggedScale) {
-                log("osmAnd: zoom: ${"%.0f".format(smoothedSpeedKmh)} km/h → " +
-                    "Voraussicht ${"%.0f".format(currentLookaheadM)} m (scale=$dynamicScale)")
+                log(resources.getString(R.string.log_osmand_zoom, "%.0f".format(smoothedSpeedKmh), "%.0f".format(currentLookaheadM), dynamicScale))
                 lastLoggedScale = dynamicScale
             }
         }
@@ -588,7 +590,7 @@ class OsmAndNavSource(
         }
         val trailSnapshot = synchronized(trail) { ArrayList(trail) }
         return FrameBuilder.buildFrame(seq, headingDeg10, dynamicScale, route, streets, trailSnapshot) { line ->
-            log("osmAnd: $line")
+            log(resources.getString(R.string.log_osmand_frame, line))
         }
     }
 
@@ -616,13 +618,13 @@ class OsmAndNavSource(
             flags = flags or Context.BIND_ALLOW_ACTIVITY_STARTS
         }
         val ok = try { context.bindService(intent, connection, flags) }
-                 catch (e: Exception) { log("osmAnd: bind failed: $e"); false }
+                 catch (e: Exception) { log(resources.getString(R.string.log_osmand_bind_failed, e)); false }
         if (ok) {
             bound = true
-            log("osmAnd: bind requested … (V2)")
+            log(resources.getString(R.string.log_osmand_bind_requested))
             main.postDelayed({ tryRegisterNav() }, 1500)
         } else {
-            log("osmAnd: not found (check installation)")
+            log(resources.getString(R.string.log_osmand_not_found))
         }
     }
 
@@ -630,7 +632,7 @@ class OsmAndNavSource(
     private fun tryRegisterNav() {
         if (!bound) return
         val s = svc ?: run {
-            log("osmAnd: service not connected yet — retrying …")
+            log(resources.getString(R.string.log_osmand_not_connected))
             main.postDelayed({ tryRegisterNav() }, 2000)
             return
         }
@@ -641,11 +643,9 @@ class OsmAndNavSource(
             val id = s.registerForNavigationUpdates(p, callback)
             if (id >= 0) {
                 navCallbackId = id
-                log("osmAnd: nav updates registered (id=$id)")
+                log(resources.getString(R.string.log_osmand_nav_registered, id))
             } else {
-                log("osmAnd: id=-1 → app not yet enabled in OsmAnd. " +
-                    "Our package: ${context.packageName}. " +
-                    "OsmAnd: menu → plugins → tap \"LibreMoto\". (retrying …)")
+                log(resources.getString(R.string.log_osmand_not_enabled, context.packageName))
                 main.postDelayed({ tryRegisterNav() }, 5000)
                 return
             }
@@ -656,13 +656,13 @@ class OsmAndNavSource(
             val rid = s.registerForRouteUpdates(rp, callback)
             if (rid >= 0) {
                 routeCallbackId = rid
-                log("osmAnd: route updates registered (id=$rid)")
+                log(resources.getString(R.string.log_osmand_nav_registered, id))
             }
 
             // 3. Pull the current route geometry (if a route is already active)
             pullRouteGeometry()
         } catch (e: RemoteException) {
-            log("osmAnd: registration failed: $e")
+            log(resources.getString(R.string.log_osmand_reg_failed, e))
             main.postDelayed({ tryRegisterNav() }, 5000)
         }
     }
@@ -715,8 +715,7 @@ class OsmAndNavSource(
                 if (newVersion != routeVersion || routePoints.isEmpty()) {
                     routePoints = result.points
                     routeVersion = newVersion
-                    log("osmAnd: route geometry: ${result.points.size} points, " +
-                        "${result.totalDistanceM} m total, ${result.remainingDistanceM} m rest, v=$newVersion")
+                    log(resources.getString(R.string.log_osmand_route_geometry, result.points.size, result.totalDistanceM, result.remainingDistanceM, newVersion))
                     checkRouteCoverage(result.points)
                 } else {
                     // Same version but points may have shifted (vehicle moved)
@@ -725,12 +724,12 @@ class OsmAndNavSource(
                 }
             } else {
                 if (routePoints.isNotEmpty()) {
-                    log("osmAnd: no active route (ok=$ok)")
+                    log(resources.getString(R.string.log_osmand_no_route, ok))
                     routePoints = emptyList()
                 }
             }
         } catch (e: RemoteException) {
-            log("osmAnd: getActiveRouteGeometry failed: $e")
+            log(resources.getString(R.string.log_osmand_get_active_route_failed, e))
         }
     }
 
@@ -745,11 +744,9 @@ class OsmAndNavSource(
         if (mm.loadedRegions().isEmpty()) return   // no maps → AIDL fallback, no warning spam
         val cov = mm.checkRoute(points.map { it.latitude to it.longitude })
         if (cov.covered) {
-            log("lmm: route fully covered (${mm.loadedRegions().size} regions)")
+            log(resources.getString(R.string.log_lmm_covered, mm.loadedRegions().size))
         } else {
-            log("WARNING: no map data for the route at " +
-                "${"%.4f".format(cov.gapLat)}, ${"%.4f".format(cov.gapLon)} — " +
-                "please download the region in the app! (roads via AIDL)")
+            log(resources.getString(R.string.log_lmm_not_covered, cov.gapLat, cov.gapLon))
         }
     }
 
@@ -890,8 +887,7 @@ class OsmAndNavSource(
         if (lmmRoads != null && lmmRoads.isNotEmpty()) {
             val newLimit = routeRoadMaxspeed(lmmRoads, centerLat, centerLon)
             if (newLimit != currentLimitKmh) {
-                log("limit: ${if (newLimit > 0) "$newLimit km/h" else "none"} " +
-                    "(road under the vehicle, ${lmmRoads.size} candidates)")
+                log(resources.getString(R.string.log_osmand_limit, if (newLimit > 0) "$newLimit km/h" else "none", lmmRoads.size))
                 currentLimitKmh = newLimit
             }
             val out = ArrayList<net.osmand.aidlapi.map.ARoadPolyline>(lmmRoads.size)
@@ -904,7 +900,7 @@ class OsmAndNavSource(
                 out.add(poly)
             }
             if (out.size != lastNearbyCount) {
-                log("lmm: ${out.size} roads in window (of ${mm!!.loadedRegions().size} regions)")
+                log(resources.getString(R.string.log_lmm_roads, out.size, mm!!.loadedRegions().size))
                 lastNearbyCount = out.size
             }
             nearbyRoads = out
@@ -912,7 +908,7 @@ class OsmAndNavSource(
         }
 
         // FALLBACK: AIDL (no .lmm region covers this position)
-        val s = svc ?: run { log("osmAnd: nearby: svc null"); return }
+        val s = svc ?: run { log(resources.getString(R.string.log_osmand_nearby_svc_null)); return }
         try {
             val params = net.osmand.aidlapi.map.NearbyRoadsParams()
             params.setCenterLat(centerLat)
@@ -921,20 +917,20 @@ class OsmAndNavSource(
             params.setMaxRoads(20)
             val result = net.osmand.aidlapi.map.NearbyRoadsResult()
             val ok = s.getNearbyRoads(params, result)
-            log("osmAnd: nearby: ok=$ok roads=${result.roads.size} total=${result.totalFound}")
+            log(resources.getString(R.string.log_osmand_nearby_ok, ok, result.roads.size, result.totalFound))
             if (ok && result.roads.isNotEmpty()) {
                 nearbyRoads = result.roads
                 if (nearbyRoads.size != lastNearbyCount) {
-                    log("osmAnd: nearby roads: ${nearbyRoads.size} roads (total=${result.totalFound})")
+                    log(resources.getString(R.string.log_osmand_nearby_roads, nearbyRoads.size, result.totalFound))
                     lastNearbyCount = nearbyRoads.size
                 }
             } else {
                 nearbyRoads = emptyList()
             }
         } catch (e: RemoteException) {
-            log("osmAnd: nearby RemoteException: ${e.message}")
+            log(resources.getString(R.string.log_osmand_nearby_exception, e.message))
         } catch (e: Exception) {
-            log("osmAnd: nearby error: ${e.javaClass.simpleName}: ${e.message}")
+            log(resources.getString(R.string.log_osmand_nearby_error, e.javaClass.simpleName, e.message))
         }
     }
 
@@ -1020,7 +1016,7 @@ class OsmAndNavSource(
                 }
             }
             context.unbindService(connection)
-        } catch (e: Exception) { log("osmAnd: stop: $e") }
+        } catch (e: Exception) { log(resources.getString(R.string.log_osmand_stop, e)) }
         bound = false
         navActive = false
         navCallbackId = -1L

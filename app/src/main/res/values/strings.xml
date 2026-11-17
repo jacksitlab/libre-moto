@@ -1,18 +1,137 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">LibreMoto</string>
-    <string name="btn_bluetooth">Suchen &amp; Verbinde</string>
-    <string name="btn_status">Status lesen</string>
-    <string name="btn_send_nav">Nav senden</string>
-    <string name="btn_send_map">Map senden</string>
-    <string name="btn_beep">Heartbeat</string>
-    <string name="btn_stream">Stream start/stopp</string>
-    <string name="btn_control_idle">Board → Idle</string>
-    <string name="btn_disconnect">Trennen</string>
-    <string name="lbl_ble">Bluetooth</string>
-    <string name="lbl_source">Nav-Quelle</string>
-    <string name="lbl_map_on">Karte zeigen</string>
-    <string name="lbl_log">Log</string>
-    <string name="src_mock">Demo-Route (Mock)</string>
-    <string name="src_osmand">osmAnd (AIDL)</string>
+    <string name="menu">Menü</string>
+    <string name="ble_status_connecting">Verbinde …</string>
+    <string name="btn_retry">Erneut versuchen</string>
+    <string name="btn_retry_auto">Erneut versuchen (auto in %1$d s)</string>
+    <string name="ble_searching">Suche LibreMoto-Display …</string>
+    <string name="ble_attempt">Versuch %1$d</string>
+    <string name="ble_connected">✓ Verbunden</string>
+    <string name="ble_not_connected">Nicht verbunden</string>
+    <string name="ble_off">Bluetooth ist aus</string>
+    <string name="ble_not_found">Display nicht gefunden</string>
+    <string name="log_open">Log ▸</string>
+    <string name="log_close">Log ▾</string>
+    <string name="menu_maps">Karten-Verwaltung</string>
+    <string name="menu_log">Log anzeigen/ausblenden</string>
+    <string name="maps_none">Noch keine Karten installiert</string>
+    <string name="maps_installed">Karten: %1$s</string>
+    <string name="tab_available">Verfügbar</string>
+    <string name="tab_installed">Installiert</string>
+    <string name="index_loading">Lade Geofabrik-Index …</string>
+    <string name="index_failed">Index-Laden fehlgeschlagen (Netzwerk?)</string>
+    <string name="continents">Kontinente</string>
+    <string name="status_updating">wird geprüft</string>
+    <string name="status_up_to_date">aktuell</string>
+    <string name="status_update_available">Update verfügbar</string>
+    <string name="status_unknown">—</string>
+    <string name="installed_hint_none">Noch keine Karten installiert</string>
+    <string name="installed_hint">Antippen zum Aktualisieren/Löschen</string>
+    <string name="action_update">Aktualisieren (neue Kartendaten laden)</string>
+    <string name="action_delete">Löschen</string>
+    <string name="btn_cancel">Abbrechen</string>
+    <string name="download_start">Lade %1$s …</string>
+    <string name="download_progress">Lade %1$s: %2$d %%</string>
+    <string name="converting">Konvertiere %1$s …</string>
+    <string name="confirm_delete">Region ist installiert. Löschen?</string>
+    <string name="size_mb_large">%.0f MB</string>
+    <string name="size_mb_small">%.1f MB</string>
+    <!-- Log strings -->
+    <string name="log_ble_unavailable">BLE: nicht verfügbar</string>
+    <string name="log_ble_adapter_missing">BLE: Adapter fehlt</string>
+    <string name="log_ble_off">BLE: aus</string>
+    <string name="log_ble_ready">BLE: bereit</string>
+    <string name="log_tx_dropped">tx: verworfen (nicht verbunden)</string>
+    <string name="log_map_drain">map drain: %1$d ms avg per frame (%2$s fps max)</string>
+    <string name="log_tx_wedged">tx: %1$dx abgelehnt — GATT verkeilt, verbinde neu</string>
+    <string name="log_tx_rejected">tx: writeCharacteristic abgelehnt — Chunk verworfen</string>
+    <string name="log_tx_no_perm">tx: keine Berechtigung</string>
+    <string name="log_tx_error">tx: %1$s: %2$s</string>
+    <string name="log_connected">verbunden</string>
+    <string name="log_disconnected_status">getrennt (status=%1$d)</string>
+    <string name="log_mtu">MTU=%1$d, MapChunk=%2$d</string>
+    <string name="log_ble_no_svc_perm">BLE: keine Service-Erweiterung-Berechtigung</string>
+    <string name="log_ble_svc_not_found">BLE: Service %1$s nicht gefunden</string>
+    <string name="log_ble_mtu_low">BLE: MTU nur %1$d — NavData kann %2$d B übersteigen (Stottern!)</string>
+    <string name="log_service_ready">Service bereit — Kanäle: nav=%1$s sts=%2$s map=%3$s ctl=%4$s</string>
+    <string name="log_status_subscribed">Status-Notify abonniert</string>
+    <string name="log_status_notify_failed">status notify fehlgeschlagen: %1$s</string>
+    <string name="log_status_read">status gelesen: %1$s</string>
+    <string name="log_write_status">Write %1$s status=%2$d ⚠</string>
+    <string name="log_status_notify">Status-Notify: %1$s</string>
+    <string name="log_tx_stats">tx: cbs=%1$d paced=%2$d queue=%3$d</string>
+    <string name="log_tx_dropped_n">tx: %1$d Einträge verworfen (%2$s)</string>
+    <string name="log_ble_no_adapter">BLE: kein Adapter</string>
+    <string name="log_ble_turn_on">BLE: erst einschalten</string>
+    <string name="log_scanning">scanne: \"%1$s\" …</string>
+    <string name="log_ble_scan_perm">BLE: fehlt Berechtigung (BLUETOOTH_SCAN/CONNECT)</string>
+    <string name="log_connecting">verbinde: %1$s</string>
+    <string name="log_status_ch_missing">status: Kanal fehlt</string>
+    <string name="log_ble_read_perm">BLE: keine Leseberechtigung</string>
+    <string name="log_nav_dropped">nav: verworfen (%1$dB > MTU %2$dB — prüfe MTU-Verhandlung)</string>
+    <string name="log_tx_nav">TX nav  (%1$dB): %2$s</string>
+    <string name="log_ctl_dropped">ctl: verworfen (%1$dB > MTU %2$dB)</string>
+    <string name="log_tx_ctl">TX ctl  (%1$dB): %2$s</string>
+    <string name="log_map_ch_missing">map: Kanal fehlt</string>
+    <string name="log_map_skipped">map: übersprungen (vorheriges Frame noch unterwegs, gesamt %1$d) — Link pachtet sich selbst</string>
+    <string name="log_map_rate">map: %1$.1f fps gesendet, %2$d übersprungen (10 s Fenster)</string>
+    <string name="log_tx_map">TX map  (%1$dB, %2$d Chunks)</string>
+    <string name="log_disconnected">disconnected</string>
+    <string name="log_disconnected_user">getrennt (Benutzer)</string>
+    <!-- MapManager -->
+    <string name="log_maps_index">maps: %1$d Geofabrik Regionen im Index</string>
+    <string name="log_maps_index_error">maps: Index-Fehler: %1$s</string>
+    <string name="log_maps_meta_error">maps: meta-Schreibfehler %1$s: %2$s</string>
+    <string name="log_maps_download_error">maps: Download-Fehler %1$s: %2$s</string>
+    <string name="log_maps_converted">maps: %1$s konvertiert (Format v2/LMM2): %2$d Straßen, Tiles %3$d, verworfen %4$d</string>
+    <string name="log_download_start">Downloads %1$s …</string>
+    <string name="log_download_progress">Download %1$s: %2$d / %3$d MB</string>
+    <string name="log_convert_start">Konvertiere %1$s …</string>
+    <string name="log_download_done">%1$s: %2$d Straßen, %3$d MB — fertig (%4$d s)</string>
+    <string name="log_download_failed">%1$s fehlgeschlagen: %2$s</string>
+    <string name="log_region_deleted">Region gelöscht: %1$s</string>
+    <string name="log_maps_loaded_v2">maps: %1$s = %2$d Straßen, Format v2 (mit Geschwindigkeitsbegrenzungen), %3$d Straßen mit Begrenzung</string>
+    <string name="log_maps_loaded_v1">maps: %1$s = %2$d Straßen, Format v1 (ohne!), %3$d Straßen mit Begrenzung</string>
+    <string name="log_maps_load_error">maps: Lade-Fehler %1$s: %2$s</string>
+    <string name="log_maps_loaded">maps: %1$d Regionen geladen</string>
+    <!-- OsmAndNavSource -->
+    <string name="log_osmand_turn">osmAnd: in %1$d m → %2$s</string>
+    <string name="log_osmand_route_event">osmAnd: Routenereignis %1$s (v=%2$d)</string>
+    <string name="log_osmand_route_cleared">osmAnd: Route gelöscht</string>
+    <string name="route_event_recalculated">NEU GEPLANT</string>
+    <string name="route_event_cancelled">ABGEHOLT</string>
+    <string name="route_event_finished">FEKTIG</string>
+    <string name="route_event_unknown">UNBEKANNT(%1$d)</string>
+    <string name="log_osmand_zoom">osmAnd: Zoom: %1$.0f km/h → Voraussicht %2$.0f m (Skala=%3$d)</string>
+    <string name="log_lmm_covered">lmm: Route vollständig abgedeckt (%1$d Regionen)</string>
+    <string name="log_lmm_not_covered">WARNUNG: keine Kartendaten für die Route bei %1$.4f, %2$.4f — bitte die Region in der App herunterladen! (Straßen über AIDL)</string>
+    <string name="log_limit_set">Limit: %1$d km/h</string>
+    <string name="log_limit_none">Limit: keine</string>
+    <string name="log_lmm_roads">lmm: %1$d Straßen im Fenster (von %2$d Regionen)</string>
+    <string name="log_osmand_nearby_ok">osmAnd: in der Nähe: ok=%1$s Straßen=%2$d gesamt=%3$d</string>
+    <string name="log_osmand_nearby_roads">osmAnd: Straßen in der Nähe: %1$d Straßen (gesamt=%2$d)</string>
+    <string name="log_osmand_nearby_svc_null">osmAnd: in der Nähe: svc null</string>
+    <string name="log_osmand_nearby_exception">osmAnd: in der Nähe RemoteException: %1$s</string>
+    <string name="log_osmand_nearby_error">osmAnd: in der Nähe Fehler: %1$s: %2$s</string>
+    <string name="log_osmand_bind_failed">osmAnd: bind fehlgeschlagen: %1$s</string>
+    <string name="log_osmand_bind_requested">osmAnd: bind angefordert … (V2)</string>
+    <string name="log_osmand_not_found">osmAnd: nicht gefunden (Installation prüfen)</string>
+    <string name="log_osmand_not_connected">osmAnd: Service noch nicht verbunden — versuche erneut …</string>
+    <string name="log_osmand_service_connected">osmAnd: Service verbunden (V2)</string>
+    <string name="log_osmand_service_disconnected">osmAnd: Service getrennt</string>
+    <string name="log_osmand_frame">osmAnd: %1$s</string>
+    <string name="log_osmand_get_active_route_failed">osmAnd: getActiveRouteGeometry fehlgeschlagen: %1$s</string>
+    <string name="log_osmand_limit">Grenze: %1$s (Straße unter dem Fahrzeug, %2$d Kandidaten)</string>
+    <string name="log_osmand_nav_registered">osmAnd: Nav-Updates registriert (id=%1$d)</string>
+    <string name="log_osmand_not_enabled">osmAnd: id=-1 → App nicht in OsmAnd aktiviert. Unser Paket: %1$s. OsmAnd: Menü → Plugins → tippe „LibreMoto“. (versuche erneut …)</string>
+    <string name="log_osmand_route_registered">osmAnd: Routen-Updates registriert (id=%1$d)</string>
+    <string name="log_osmand_reg_failed">osmAnd: Registrierung fehlgeschlagen: %1$s</string>
+    <string name="log_osmand_route_geometry">osmAnd: Routengeometrie: %1$d Punkte, %2$d m gesamt, %3$d m Rest, v=%4$d</string>
+    <string name="log_osmand_no_route">osmAnd: keine aktive Route (ok=%1$s)</string>
+    <string name="log_osmand_route_failed">osmAnd: getActiveRouteGeometry fehlgeschlagen: %1$s</string>
+    <string name="label_osmand">OsmAnd (AIDL V2)</string>
+    <string name="ble_adapter_off">aus</string>
+    <string name="log_bridge_prefix">bridge: %1$s</string>
+    <string name="log_osmand_stop">osmAnd: stop: %1$s</string>
 </resources>

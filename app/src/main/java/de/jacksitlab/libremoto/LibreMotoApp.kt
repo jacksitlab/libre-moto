@@ -5,25 +5,21 @@ import android.os.Handler
 import android.os.Looper
 import de.jacksitlab.libremoto.bridge.MapManager
 
-/** Process-wide singletons: ONE MapManager shared by MainActivity,
- *  MapsActivity and the nav source — one region registry, one cache. */
 class LibreMotoApp : Application() {
-
     lateinit var mapManager: MapManager
         private set
 
     override fun onCreate() {
         super.onCreate()
         val main = Handler(Looper.getMainLooper())
-        mapManager = MapManager(this,
+        val resources = this.resources
+        mapManager = MapManager(this, resources,
             log = { line -> main.post { AppLog.append(line) } },
             ui = { _ -> })
         mapManager.loadAll()
     }
 }
 
-/** Process-wide log sink: every component logs here; the MainActivity
- *  view subscribes when visible. Also mirrors to logcat (tag LibreMoto). */
 object AppLog {
     private val lines = ArrayDeque<String>(200)
     private val listeners = ArrayList<(String) -> Unit>()

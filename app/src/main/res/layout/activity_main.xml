@@ -16,7 +16,7 @@
             android:layout_height="80dp"
             android:layout_gravity="center_horizontal"
             android:layout_marginTop="8dp"
-            android:contentDescription="LibreMoto"
+            android:contentDescription="@string/app_name"
             android:src="@drawable/logo" />
 
         <!-- Overflow-Menü als simpler Text-Button (⋮): folgt der
@@ -29,7 +29,7 @@
             android:layout_height="48dp"
             android:layout_gravity="top|end"
             android:background="?android:attr/selectableItemBackground"
-            android:contentDescription="Menü"
+            android:contentDescription="@string/menu"
             android:gravity="center"
             android:text="⋮"
             android:textSize="26sp" />
@@ -42,7 +42,7 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="24dp"
         android:gravity="center"
-        android:text="Verbinde …"
+        android:text="@string/ble_status_connecting"
         android:textSize="18sp"
         android:textStyle="bold" />
 
@@ -61,7 +61,7 @@
         android:layout_gravity="center_horizontal"
         android:layout_marginTop="16dp"
         android:minWidth="200dp"
-        android:text="Erneut versuchen"
+        android:text="@string/btn_retry"
         android:visibility="gone" />
 
     <!-- Status der Karten/Route unten, dezent -->
@@ -85,7 +85,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:padding="8dp"
-        android:text="Log ▸"
+        android:text="@string/log_open"
         android:textSize="12sp" />
 
     <TextView

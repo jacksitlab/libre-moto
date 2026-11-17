@@ -55,7 +55,7 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        ble = BleController(this) { line -> AppLog.append(line) }
+        ble = BleController(this, resources) { line -> AppLog.append(line) }
 
         bleStatus = findViewById(R.id.ble_status)
         bleDetail = findViewById(R.id.ble_detail)
@@ -109,11 +109,11 @@ class MainActivity : AppCompatActivity() {
         retryRunnable = null
         connectAttempts++
         retryBtn.visibility = View.GONE
-        bleStatus.text = "Suche LibreMoto-Display …"
-        bleDetail.text = "Versuch $connectAttempts"
+        bleStatus.text = getString(R.string.ble_searching)
+        bleDetail.text = getString(R.string.ble_attempt, connectAttempts)
         ble.startScan { _, address ->
             main.post {
-                bleStatus.text = "Verbinde …"
+                bleStatus.text = getString(R.string.ble_status_connecting)
                 ble.connect(address)
             }
         }
@@ -128,7 +128,7 @@ class MainActivity : AppCompatActivity() {
                 val delay = (3000L * (1 shl (connectAttempts - 1).coerceAtMost(4)))
                     .coerceAtMost(30_000L)
                 retryBtn.visibility = View.VISIBLE
-                retryBtn.text = "Erneut versuchen (auto in ${delay / 1000} s)"
+                retryBtn.text = getString(R.string.btn_retry_auto, (delay / 1000).toInt())
                 val rr = Runnable {
                     if (!ble.isReady && retryBtn.visibility == View.VISIBLE) autoConnect()
                 }
@@ -141,13 +141,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderConnection(connected: Boolean) {
         if (connected) {
-            bleStatus.text = "✓ Verbunden"
+            bleStatus.text = getString(R.string.ble_connected)
             bleDetail.text = ""
             retryBtn.visibility = View.GONE
             startStreamIfReady()
         } else {
-            bleStatus.text = "Nicht verbunden"
-            bleDetail.text = if (ble.adapterState().contains("aus")) "Bluetooth ist aus" else "Display nicht gefunden"
+            bleStatus.text = getString(R.string.ble_not_connected)
+            bleDetail.text = if (ble.adapterState().contains(getString(R.string.ble_adapter_off))) getString(R.string.ble_off) else getString(R.string.ble_not_found)
             retryBtn.visibility = View.VISIBLE
         }
     }
@@ -161,7 +161,7 @@ class MainActivity : AppCompatActivity() {
     // The nav source: OsmAnd only (Mock removed from the UI; the factory
     // still supports it for tests).
     private val navSource by lazy {
-        val s = NavSourceFactory.create(SourceKind.OsmAnd, this) { line -> AppLog.append(line) }
+        val s = NavSourceFactory.create(SourceKind.OsmAnd, this, resources) { line -> AppLog.append(line) }
         (s as? de.jacksitlab.libremoto.bridge.OsmAndNavSource)?.attachMapManager(
             (application as LibreMotoApp).mapManager)
         s.start()
@@ -173,7 +173,7 @@ class MainActivity : AppCompatActivity() {
     private fun toggleLog() {
         logVisible = !logVisible
         logView.visibility = if (logVisible) View.VISIBLE else View.GONE
-        logToggle.text = if (logVisible) "Log ▾" else "Log ▸"
+        logToggle.text = if (logVisible) getString(R.string.log_close) else getString(R.string.log_open)
         if (logVisible) logView.text = AppLog.history().joinToString("\n")
     }
 
@@ -207,8 +207,8 @@ class MainActivity : AppCompatActivity() {
         renderConnection(ble.isReady)
         // keep the map status line fresh
         val mm = (application as LibreMotoApp).mapManager
-        mapStatus.text = if (mm.loadedRegions().isEmpty()) "No maps installed (menu → map manager)"
-        else "Karten: ${mm.loadedRegions().keys.joinToString()}"
+        mapStatus.text = if (mm.loadedRegions().isEmpty()) getString(R.string.maps_none)
+        else getString(R.string.maps_installed, mm.loadedRegions().keys.joinToString())
     }
 
     override fun onDestroy() {

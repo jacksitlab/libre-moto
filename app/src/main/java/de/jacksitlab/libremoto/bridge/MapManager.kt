@@ -20,6 +20,9 @@
 package de.jacksitlab.libremoto.bridge
 
 import android.content.Context
+import android.content.res.Resources
+import de.jacksitlab.libremoto.R
+import de.jacksitlab.libremoto.protocol.MapFrame
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -48,6 +51,7 @@ data class CoverageResult(
 
 class MapManager(
     private val context: Context,
+    private val resources: Resources,
     private val log: (String) -> Unit,
     private val ui: (String) -> Unit,   // user-visible progress line
 ) {
@@ -108,10 +112,10 @@ class MapManager(
                     out[gid] = GeofabrikRegion(gid, name, pbf, parentId, minLat, minLon, maxLat, maxLon)
                 }
                 regions = out
-                log("maps: ${out.size} Geofabrik regions in index")
+                log(resources.getString(R.string.log_maps_index, out.size))
                 onDone(true)
             } catch (e: Exception) {
-                log("maps: index error: ${e.message}")
+                log(resources.getString(R.string.log_maps_index_error, e.message ?: ""))
                 onDone(false)
             }
         }
@@ -162,7 +166,7 @@ class MapManager(
             o.put("date", System.currentTimeMillis())
             o.put("bytes", bytes)
             metaFile(regionId).writeText(o.toString())
-        } catch (e: Exception) { log("maps: meta write error $regionId: ${e.message}") }
+        } catch (e: Exception) { log(resources.getString(R.string.log_maps_meta_error, regionId, e.message ?: "")) }
     }
 
     /** Installed .lmm size in bytes (0 if missing). */
@@ -217,7 +221,7 @@ class MapManager(
         executor.execute {
             val target = File(mapsDir, "${region.id}.lmm")
             try {
-                ui("Downloading ${region.name} …")
+                ui(resources.getString(R.string.log_download_start, region.name))
                 val tmp = File(context.cacheDir, "${region.id}.osm.pbf")
                 // Geofabrik's md5 for the pbf — stored in .meta for UPDATE
                 // detection (checkUpdates compares it later)
@@ -227,10 +231,10 @@ class MapManager(
                 } catch (_: Exception) { null }
                 httpDownload(region.pbfUrl, tmp) { done, total ->
                     val pct = if (total > 0) (done * 100 / total).toInt() else 0
-                    ui("Downloading ${region.name}: ${done / 1048576} / ${total / 1048576} MB")
+                    ui(resources.getString(R.string.log_download_progress, region.name, done / 1048576, total / 1048576))
                     progress?.invoke(0, pct)
                 }
-                ui("Converting ${region.name} …")
+                ui(resources.getString(R.string.log_convert_start, region.name))
                 progress?.invoke(1, 0)
                 val t0 = System.currentTimeMillis()
                 val res = OsmPbfReader.scan(tmp)
