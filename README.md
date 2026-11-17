@@ -1,18 +1,21 @@
 # Libre-Moto
 
-An open-source navigation/map display for motorcycle handlebars, built on the **ESP32-S3 + round touch display** hardware (CrowPanel 2.1" 480×480, ST7701S, CST816 touch). All input is **touch** (tap / hold / swipe) — this board revision has no rotary knob.
+An open-source navigation/map display for motorcycle handlebars, built on the **ESP32-S3 + round touch display** hardware. Currently supports the **CrowPanel 2.1"** (ST7701S, 480×480) and the **Waveshare AMOLED 1.75C** (CO5300, 466×466) is in progress. All input is **touch** (tap / hold / swipe).
+
+🌐 [Website](https://libre-moto.jacks-it-lab.de) · [Docs](docs/) · [Issues](https://github.com/jacksitlab/libre-moto/issues)
 
 The display receives navigation data (turn instructions + a minimalistic vector map) via **Bluetooth Low Energy** from a smartphone (osmAnd + companion app) and shows them **glove-friendly** and **without distraction**, with a minimalist interface that keeps the focus on the road.
 
 The board ships with a **serial self-test** (`mt0`–`mt3`) that drives the full BLE pipeline from a terminal, so you can verify the map renderer, state machine, and touch UI without a phone. See `firmware/README_TESTS.md`.
 
-## Status: Phases A + B.1 + C.1 + C.2 (app v1) done. Next: on-device bring-up + B.2
+## Status: Phases A + B.1 + C.1 + C.2 (app v1) done. Next: Waveshare AMOLED support + B.2
 
 - [x] **Phase 0** — Protocol & hardware specs, repo structure, starter firmware
-- [x] **Phase A** — Display & UI (Arduino_GFX + LVGL 9.5, touch gestures, state machine)
+- [x] **Phase A** — Display & UI (LVGL 9.5, touch gestures, state machine)
 - [x] **Phase B** — BLE GATT server (NavData, Status, MapData, Control) + heartbeat
 - [x] **C.1** — MapData binary parser + LVGL map renderer (roads as twin-edge lines, route as filled white line)
-- [x] **C.2** — **Android companion app** (Kotlin, XML, BLE client, osmAnd AIDL + Mock sources, byte-exact encoders) — next: on-device BLE bring-up
+- [x] **C.2** — **Android companion app** (Kotlin, XML, BLE client, osmAnd AIDL + Mock sources, byte-exact encoders)
+- [ ] **Waveshare AMOLED 1.75C** — CO5300 QSPI display driver + CST9217 touch HAL in progress
 - [ ] **B.2** — Robustness & stress tests (100 writes/5s, reconnect <5s)
 - [ ] **Phase D** — UX polish (auto-dim, auto-off, transitions)
 - [ ] **Phase E** — v0.1.0 release (firmware + APK)
